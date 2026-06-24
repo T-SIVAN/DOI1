@@ -290,6 +290,37 @@ def render_tool_result(title: str, content: str, file_name: str) -> None:
     render_markdown_download("下载 Markdown", content, file_name)
 
 
+def render_quick_start_guide() -> None:
+    st.info(
+        "使用前先在左侧填写 LLM API Key。"
+        "然后选择下方功能：PDF精读用于上传论文并生成解读；引用追踪用于输入 DOI/OpenAlex ID 并导出 Excel；"
+        "写作工具用于润色、审稿回复、数据声明和汇报大纲。"
+    )
+    with st.expander("快速使用说明", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(
+                "**1. 配置 Key**\n\n"
+                "- 左侧选择 `OpenAI 兼容` 或 `Google Gemini`\n"
+                "- 填写自己的 `LLM API Key`\n"
+                "- 不确定时可点 `测试连接`"
+            )
+        with col2:
+            st.markdown(
+                "**2. 选择功能**\n\n"
+                "- `PDF精读`：上传 PDF 文献\n"
+                "- `引用追踪`：输入 DOI 或 Paper ID\n"
+                "- `写作工具`：粘贴文本并选择任务"
+            )
+        with col3:
+            st.markdown(
+                "**3. 下载结果**\n\n"
+                "- PDF 精读可下载 Markdown\n"
+                "- 引用追踪可下载 Excel\n"
+                "- 云端不会保存你的上传文件"
+            )
+
+
 def apply_page_style() -> None:
     st.markdown(
         """
@@ -1700,6 +1731,7 @@ def render_app() -> None:
     apply_page_style()
     st.title("生物医学文献分析工作台")
     st.caption("PDF精读 · 引用追踪 · 学术写作")
+    render_quick_start_guide()
 
     with st.sidebar:
         st.header("配置")
