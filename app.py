@@ -293,7 +293,7 @@ def render_tool_result(title: str, content: str, file_name: str) -> None:
 def render_quick_start_guide() -> None:
     st.info(
         "使用前先在左侧填写 LLM API Key。"
-        "然后选择下方功能：PDF精读用于上传论文并生成解读；引用追踪用于输入 DOI/OpenAlex ID 并导出 Excel；"
+        "然后选择下方功能：PDF精读把一篇论文变成结构化读书报告；引用追踪用于输入 DOI/OpenAlex ID 并导出 Excel；"
         "写作工具用于润色、审稿回复、数据声明和汇报大纲。"
     )
     with st.expander("快速使用说明", expanded=True):
@@ -308,7 +308,7 @@ def render_quick_start_guide() -> None:
         with col2:
             st.markdown(
                 "**2. 选择功能**\n\n"
-                "- `PDF精读`：上传 PDF 文献\n"
+                "- `PDF精读`：生成结构化读书报告\n"
                 "- `引用追踪`：输入 DOI 或 Paper ID\n"
                 "- `写作工具`：粘贴文本并选择任务"
             )
@@ -1418,6 +1418,55 @@ def analyze_pdf_deep_reading_with_images(
     )
 
 
+def simplify_markdown_response(markdown: str, max_chars: int = 9000) -> str:
+    lines = []
+    skip_prefixes = (
+        "好的",
+        "当然",
+        "作为",
+        "我将",
+        "下面",
+        "以下",
+        "请注意",
+    )
+    for raw_line in str(markdown or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        stripped = line.strip()
+        if not lines and any(stripped.startswith(prefix) for prefix in skip_prefixes):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    return compact_text(cleaned, max_chars)
+
+
+def repair_markdown_tables(markdown: str) -> str:
+    lines = str(markdown or "").splitlines()
+    repaired: List[str] = []
+    table_header_pattern = re.compile(r"^\s*\|\s*年份\s*\|.+\|\s*$")
+    separator_pattern = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+    for index, line in enumerate(lines):
+        repaired.append(line)
+        if table_header_pattern.match(line):
+            next_line = lines[index + 1] if index + 1 < len(lines) else ""
+            if not separator_pattern.match(next_line):
+                column_count = max(2, line.count("|") - 1)
+                repaired.append("|" + "|".join(["---"] * column_count) + "|")
+    return "\n".join(repaired)
+
+
+def polish_breakthrough_report(markdown: str) -> str:
+    cleaned = simplify_markdown_response(markdown, 12000)
+    cleaned = repair_markdown_tables(cleaned)
+    if "｜" in cleaned:
+        cleaned = cleaned.replace("｜", "|")
+    return cleaned.strip()
+
+
 def analyze_field_breakthroughs(
     step1_report: str,
     pdf_text: str,
@@ -1427,23 +1476,35 @@ def analyze_field_breakthroughs(
     llm_model: str,
 ) -> str:
     prompt = f"""
-请先从下面的文献剖析报告和论文片段中提取 5-8 个核心关键词，然后完成领域突破文献追踪。
+请基于下面的文献剖析报告和论文片段，生成一份“近 10 年领域突破追踪”。
 
-作为生物医药专家，请基于刚才这篇文献的核心研究方向，为我梳理总结过去 10 年内，该细分领域（如特定酶工程、靶向富集技术等）在全球范围内的所有重大里程碑发现或技术突破的被报道文献并给出 DOI。要求客观、专业、带有时间节点。
+输出必须简洁、专业、无寒暄。不要写“好的”“作为专家”等开场白。
 
-请用中文输出，结构建议：
-### 核心关键词
-- ...
+请严格按以下 Markdown 结构输出：
 
-### 近 10 年重大里程碑报道文献
-请按时间顺序输出表格，列包括：
-| 年份 | 里程碑发现/技术突破 | 被报道文献题名 | DOI | 重要意义 |
+# <用 8-18 个字概括细分方向>突破脉络
 
-要求：
-- 尽可能覆盖该细分领域过去 10 年内所有公认的重大突破，不要只列 3-5 条。
-- DOI 必须尽量给出；如果你无法确定 DOI，请写“未检出”，不要编造。
-- 如果某条里程碑存在多个关键报道文献，可拆成多行。
-- 避免泛泛而谈，优先列原创研究论文、方法学论文或权威综述中首次系统报道的文献。
+**方向概述：** <用不超过 60 字说明该领域过去 10 年的主要演进主线。>
+
+**核心关键词：** 关键词1；关键词2；关键词3；关键词4；关键词5
+
+## 关键里程碑文献
+
+必须输出标准 Markdown 表格，并且第二行必须是分隔行：
+
+| 年份 | 里程碑/技术突破 | 代表文献 | DOI | 关键意义 |
+|---|---|---|---|---|
+| 2016 | 示例 | 示例 | 未检出 | 示例 |
+
+表格要求：
+- 按年份升序。
+- 优先列 6-12 条最关键文献，不要堆砌过多条目。
+- 每格内容控制在 60 字以内。
+- DOI 无法确定时写“未检出”，严禁编造 DOI。
+- 代表文献尽量写“第一作者 et al., 年份, 期刊”。
+
+## 使用提醒
+- DOI 需用 CrossRef/PubMed/出版社页面二次核验。
 
 文献剖析报告：
 {step1_report}
@@ -1451,7 +1512,7 @@ def analyze_field_breakthroughs(
 论文片段：
 {compact_text(pdf_text, 6000)}
 """.strip()
-    return call_llm(
+    result = call_llm(
         llm_api_key=llm_api_key,
         llm_provider=llm_provider,
         llm_base_url=llm_base_url,
@@ -1459,11 +1520,12 @@ def analyze_field_breakthroughs(
         system_prompt="你是一个熟悉生物医药技术史、酶工程、分子检测和基因组技术的专家。",
         user_prompt=prompt,
     )
+    return polish_breakthrough_report(result)
 
 
 def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
     st.subheader("PDF精读")
-    st.caption("上传论文 PDF，生成单篇剖析和近 10 年领域突破追踪。")
+    st.caption("上传一篇论文，自动提炼研究亮点、实验路线与领域突破脉络。")
 
     with st.expander("使用说明", expanded=False):
         st.markdown(
@@ -1581,14 +1643,14 @@ def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_ur
             return
 
         st.success(f"智能分析完成。实际读取方式：{analysis_source}")
-        full_report = f"# 单篇文献深度剖析\n\n{step1_report}\n\n# 近 10 年领域突破追踪\n\n{step2_report}\n"
+        full_report = f"# 单篇文献深度剖析\n\n{step1_report}\n\n# 领域突破表\n\n{step2_report}\n"
         render_markdown_download("下载完整精读报告", full_report, "pdf_deep_reading_report.md")
 
         analysis_tab, breakthrough_tab = st.tabs(["单篇剖析", "领域突破"])
         with analysis_tab:
             render_tool_result("单篇文献深度剖析", step1_report, "single_paper_analysis.md")
         with breakthrough_tab:
-            render_tool_result("近 10 年领域突破追踪", step2_report, "field_breakthroughs.md")
+            render_tool_result("领域突破表", step2_report, "field_breakthroughs.md")
 
 
 def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: int) -> None:
