@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from ppt_report import build_pptx_bytes
+
 
 OPENALEX_WORKS = "https://api.openalex.org/works"
 DEFAULT_OPENALEX_EMAIL = "user@example.com"
@@ -41,6 +43,7 @@ PDF_HYBRID_MIN_TEXT_CHARS = 800
 PDF_IMAGE_RENDER_SCALE = 1.6
 PDF_IMAGE_JPEG_QUALITY = 72
 PDF_IMAGE_MAX_BYTES = 1_200_000
+PPT_ANALYSIS_MAX_CHARS = 18000
 
 OUTPUT_COLUMNS = [
     "文献标题",
@@ -325,33 +328,72 @@ def apply_page_style() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --app-blue: #2563eb;
+            --app-blue-dark: #1d4ed8;
+            --app-border: #dbe4f0;
+            --app-muted: #64748b;
+            --app-surface: #f8fafc;
+        }
         .block-container {
-            max-width: 1180px;
-            padding-top: 2rem;
+            max-width: 1240px;
+            padding-top: 1.5rem;
             padding-bottom: 3rem;
         }
         h1 {
             letter-spacing: 0;
             margin-bottom: 0.15rem;
+            color: #0f172a;
         }
         h2, h3 {
             letter-spacing: 0;
+            color: #172033;
         }
         div[data-testid="stCaptionContainer"] {
-            color: #64748b;
+            color: var(--app-muted);
+            line-height: 1.55;
         }
         div[data-testid="stTabs"] button {
             font-weight: 600;
+            padding-top: 0.65rem;
+            padding-bottom: 0.65rem;
+        }
+        div[data-testid="stTabs"] [aria-selected="true"] {
+            color: var(--app-blue);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-color: var(--app-border);
+            background: linear-gradient(180deg, #ffffff 0%, var(--app-surface) 100%);
         }
         div[data-testid="stAlert"] {
             border-radius: 6px;
         }
+        div[data-testid="stFileUploader"] section {
+            border-color: var(--app-border);
+            background: #ffffff;
+        }
         .stDownloadButton button,
         .stButton button {
             border-radius: 6px;
+            font-weight: 600;
+            border-color: #cbd5e1;
+        }
+        .stButton button[kind="primary"],
+        .stDownloadButton button[kind="primary"] {
+            background: var(--app-blue);
+            border-color: var(--app-blue-dark);
+        }
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--app-border);
+            border-radius: 6px;
+            overflow: hidden;
         }
         section[data-testid="stSidebar"] .block-container {
             padding-top: 1.25rem;
+        }
+        section[data-testid="stSidebar"] {
+            background: #f8fafc;
+            border-right: 1px solid var(--app-border);
         }
         </style>
         """,
@@ -1730,6 +1772,209 @@ def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_ur
             render_breakthrough_result(step2_report)
 
 
+def parse_json_object(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"\s*```$", "", raw)
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if match:
+        raw = match.group(0)
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise ApiError(f"模型没有返回可解析 JSON，请重试或切换模型。原始错误：{exc}") from exc
+
+
+def normalize_ppt_analysis(data: Dict[str, Any], fallback_title: str) -> Dict[str, Any]:
+    title = strip_markup(data.get("document_title")) or fallback_title
+    main_content = strip_markup(data.get("main_content")) or "模型未能提取核心内容。"
+    framework = data.get("writing_framework") or []
+    if not isinstance(framework, list):
+        framework = [strip_markup(framework)]
+
+    sections = []
+    for item in data.get("main_content_sections") or []:
+        if not isinstance(item, dict):
+            continue
+        sections.append(
+            {
+                "section_name": strip_markup(item.get("section_name")),
+                "subtopic": strip_markup(item.get("subtopic")),
+                "key_points": strip_markup(item.get("key_points")),
+            }
+        )
+
+    figures = []
+    for item in data.get("figures_analysis") or []:
+        if not isinstance(item, dict):
+            continue
+        figures.append(
+            {
+                "figure_id": strip_markup(item.get("figure_id")) or f"fig{len(figures) + 1}",
+                "content_summary": strip_markup(item.get("content_summary")),
+                "design_purpose": strip_markup(item.get("design_purpose")),
+            }
+        )
+
+    return {
+        "document_title": title,
+        "main_content": main_content,
+        "writing_framework": [strip_markup(x) for x in framework if strip_markup(x)],
+        "main_content_sections": sections,
+        "figures_analysis": figures,
+    }
+
+
+def preview_images_from_pdf(pdf_bytes: bytes, max_pages: int = 2) -> List[Dict[str, Any]]:
+    try:
+        images = render_core_pdf_pages_as_images(pdf_bytes)
+    except Exception:
+        return []
+    return images[:max_pages]
+
+
+def analyze_pdf_for_ppt(
+    pdf_bytes: bytes,
+    file_name: str,
+    llm_api_key: str,
+    llm_provider: str,
+    llm_base_url: str,
+    llm_model: str,
+    parse_mode: str,
+) -> Dict[str, Any]:
+    content = extract_pdf_content(pdf_bytes, parse_mode)
+    prompt_text = pdf_content_to_prompt_text(content, PPT_ANALYSIS_MAX_CHARS)
+    system_prompt = "你是擅长科研文献汇报、专利技术拆解和中文 PPT 结构化表达的学术报告设计师。"
+    user_prompt = f"""
+请阅读以下 PDF 文献/专利内容，输出严格 JSON，不要输出 Markdown 或解释文字。
+
+JSON 字段：
+{{
+  "document_title": "文献或专利完整标题",
+  "main_content": "2-4 句核心内容总结，说明技术亮点、痛点和结论",
+  "writing_framework": ["背景与痛点", "核心原理", "验证路线", "应用", "总结讨论"],
+  "main_content_sections": [
+    {{"section_name": "核心内容", "subtopic": "", "key_points": "适合放入 PPT 表格的一段话"}},
+    {{"section_name": "背景与痛点", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "核心原理与概念验证", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "平台/复杂度验证", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "应用", "subtopic": "可选二级主题", "key_points": "..."}},
+    {{"section_name": "总结与讨论", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "实验与分析方法", "subtopic": "", "key_points": "..."}}
+  ],
+  "figures_analysis": [
+    {{"figure_id": "fig1", "content_summary": "图中展示的代表内容", "design_purpose": "图的设计目的"}},
+    {{"figure_id": "fig2", "content_summary": "图中展示的代表内容", "design_purpose": "图的设计目的"}}
+  ]
+}}
+
+要求：
+1. main_content_sections 尽量生成 5-7 行，文字短、信息密度高，适合蓝色表格 PPT。
+2. figures_analysis 只保留最关键的图/表，最多 6 项。
+3. 不确定的内容要写“未在文本中明确给出”，不要编造 DOI、数值或实验结论。
+
+文件名：{file_name}
+
+PDF 内容：
+{prompt_text}
+""".strip()
+    result = call_llm(
+        llm_api_key=llm_api_key,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        timeout=180,
+    )
+    return normalize_ppt_analysis(parse_json_object(result), fallback_title=file_name)
+
+
+def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
+    st.subheader("PPT汇报")
+    st.caption("上传多篇论文/专利 PDF，自动生成蓝色表格模板 PowerPoint。")
+
+    with st.container(border=True):
+        col_a, col_b, col_c = st.columns([1.2, 0.9, 0.9])
+        with col_a:
+            uploaded_files = st.file_uploader(
+                "上传 PDF（可多选）",
+                type=["pdf"],
+                accept_multiple_files=True,
+                key="ppt_pdf_uploads",
+            )
+        with col_b:
+            parse_mode = st.selectbox(
+                "PDF 解析模式",
+                [PDF_PARSE_ENHANCED, PDF_PARSE_FAST, PDF_PARSE_STRUCTURED],
+                key="ppt_parse_mode",
+            )
+            include_preview = st.checkbox("嵌入前两页预览图", value=True, key="ppt_include_preview")
+        with col_c:
+            output_name = st.text_input(
+                "输出文件名",
+                value="Academic_Analysis_Report.pptx",
+                key="ppt_output_name",
+            )
+            if not output_name.lower().endswith(".pptx"):
+                output_name += ".pptx"
+
+    st.info("版式为内置 PPT 格式：白底、蓝色表头、浅蓝内容表格、图文左右布局，不需要额外 PPT 模板文件。")
+    start = st.button("生成 PPT", type="primary", use_container_width=True, key="ppt_generate")
+
+    if not start:
+        return
+    if not validate_llm_config(llm_api_key, llm_base_url, llm_model):
+        return
+    if not uploaded_files:
+        st.warning("请先上传至少一个 PDF。")
+        return
+
+    analyses: List[Dict[str, Any]] = []
+    progress = st.progress(0.0, text="准备开始...")
+    log_box = st.empty()
+
+    for idx, uploaded in enumerate(uploaded_files, start=1):
+        pdf_bytes = uploaded.getvalue()
+        log_box.info(f"正在分析 {idx}/{len(uploaded_files)}：{uploaded.name}")
+        try:
+            analysis = analyze_pdf_for_ppt(
+                pdf_bytes=pdf_bytes,
+                file_name=uploaded.name,
+                llm_api_key=llm_api_key.strip(),
+                llm_provider=llm_provider,
+                llm_base_url=llm_base_url.strip(),
+                llm_model=llm_model.strip(),
+                parse_mode=parse_mode,
+            )
+            if include_preview:
+                analysis["preview_images"] = preview_images_from_pdf(pdf_bytes, 2)
+            analyses.append(analysis)
+            progress.progress(idx / len(uploaded_files), text=f"已完成 {idx}/{len(uploaded_files)}")
+        except Exception as exc:
+            st.error(f"{uploaded.name} 解析失败：{exc}")
+
+    if not analyses:
+        st.error("没有成功解析任何 PDF，无法生成 PPT。")
+        return
+
+    with st.spinner("正在排版并生成 PPT..."):
+        pptx_bytes = build_pptx_bytes(analyses)
+    log_box.success("PPT 已生成。")
+    st.download_button(
+        "下载 PPT",
+        data=pptx_bytes,
+        file_name=output_name,
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        use_container_width=True,
+    )
+
+    with st.expander("本次解析标题", expanded=False):
+        for idx, analysis in enumerate(analyses, start=1):
+            st.write(f"{idx}. {analysis.get('document_title')}")
+
+
 def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: int) -> None:
     st.subheader("引用追踪")
     st.caption("输入 DOI 或 OpenAlex Paper ID，抓取引用该文献的论文并导出 Excel。")
@@ -1869,7 +2114,7 @@ def render_app() -> None:
     st.set_page_config(page_title="生物医学文献分析工作台", layout="wide")
     apply_page_style()
     st.title("生物医学文献分析工作台")
-    st.caption("PDF精读 · 引用追踪 · 学术写作")
+    st.caption("PDF精读 · 引用追踪 · 学术写作 · PPT汇报")
     render_quick_start_guide()
 
     with st.sidebar:
@@ -1907,13 +2152,15 @@ def render_app() -> None:
                 except Exception as exc:
                     st.error(f"连接失败：{exc}")
 
-    pdf_tab, citation_tab, nature_tab = st.tabs(["PDF精读", "引用追踪", "写作工具"])
+    pdf_tab, citation_tab, nature_tab, ppt_tab = st.tabs(["PDF精读", "引用追踪", "写作工具", "PPT汇报"])
     with pdf_tab:
         render_pdf_deep_reading_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
     with citation_tab:
         render_citation_tracking_tab(openalex_api_key, email, int(max_papers))
     with nature_tab:
         render_nature_toolbox_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
+    with ppt_tab:
+        render_ppt_report_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
 
 
 if __name__ == "__main__":

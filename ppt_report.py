@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+from io import BytesIO
+from typing import Any, Dict, Iterable, List
+
+from PIL import Image
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Inches, Pt
+
+
+BLUE = RGBColor(68, 114, 196)
+LIGHT_BLUE = RGBColor(217, 225, 242)
+MID_BLUE = RGBColor(200, 210, 232)
+PALE_BLUE = RGBColor(232, 237, 249)
+WHITE = RGBColor(255, 255, 255)
+BLACK = RGBColor(0, 0, 0)
+MUTED = RGBColor(80, 80, 80)
+
+
+def compact_text(value: Any, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "..."
+
+
+def chunked(items: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def blank_slide(prs: Presentation):
+    return prs.slides.add_slide(prs.slide_layouts[6])
+
+
+def add_rect(slide, left, top, width, height, fill=WHITE, line=WHITE):
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = fill
+    shape.line.color.rgb = line
+    return shape
+
+
+def set_font(paragraph, size=14, bold=False, color=BLACK):
+    paragraph.font.name = "Microsoft YaHei"
+    paragraph.font.size = Pt(size)
+    paragraph.font.bold = bold
+    paragraph.font.color.rgb = color
+
+
+def add_textbox(
+    slide,
+    text: str,
+    left,
+    top,
+    width,
+    height,
+    *,
+    size=16,
+    bold=False,
+    color=BLACK,
+    align=PP_ALIGN.LEFT,
+):
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    tf.margin_left = Inches(0.03)
+    tf.margin_right = Inches(0.03)
+    tf.margin_top = Inches(0.02)
+    tf.margin_bottom = Inches(0.02)
+    p = tf.paragraphs[0]
+    p.text = text
+    p.alignment = align
+    set_font(p, size=size, bold=bold, color=color)
+    return box
+
+
+def format_cell(cell, text, fill, font_color=BLACK, size=13, bold=False):
+    cell.fill.solid()
+    cell.fill.fore_color.rgb = fill
+    cell.margin_left = Inches(0.08)
+    cell.margin_right = Inches(0.08)
+    cell.margin_top = Inches(0.04)
+    cell.margin_bottom = Inches(0.04)
+    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf = cell.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p = tf.paragraphs[0]
+    p.text = str(text or "")
+    p.alignment = PP_ALIGN.LEFT
+    set_font(p, size=size, bold=bold, color=font_color)
+
+
+def add_title_slide(prs: Presentation):
+    slide = blank_slide(prs)
+    add_rect(slide, Inches(0), Inches(0), prs.slide_width, prs.slide_height, WHITE)
+    add_rect(slide, Inches(0.75), Inches(2.25), Inches(11.85), Inches(1.12), BLUE)
+    add_textbox(
+        slide,
+        "自动化文献与专利结构分析报告",
+        Inches(1.0),
+        Inches(2.45),
+        Inches(11.35),
+        Inches(0.5),
+        size=28,
+        bold=True,
+        color=WHITE,
+        align=PP_ALIGN.CENTER,
+    )
+    add_textbox(
+        slide,
+        "PDF 自动解析 · 结构化内容表 · 关键图表解读",
+        Inches(1.9),
+        Inches(3.62),
+        Inches(9.55),
+        Inches(0.4),
+        size=18,
+        color=MUTED,
+        align=PP_ALIGN.CENTER,
+    )
+
+
+def reference_header(slide, index: int, title: str):
+    add_textbox(
+        slide,
+        f"文献{index}. {compact_text(title, 145)}",
+        Inches(0.55),
+        Inches(0.22),
+        Inches(12.25),
+        Inches(0.45),
+        size=14,
+        color=BLACK,
+    )
+
+
+def default_sections(analysis: Dict[str, Any]) -> List[Dict[str, str]]:
+    sections = analysis.get("main_content_sections") or []
+    if sections:
+        return sections[:7]
+    framework = analysis.get("writing_framework") or []
+    labels = [
+        "背景与痛点",
+        "核心原理与概念验证",
+        "平台/复杂度验证",
+        "应用",
+        "总结与讨论",
+        "实验与分析方法",
+    ]
+    defaults = []
+    for idx, label in enumerate(labels):
+        defaults.append(
+            {
+                "section_name": label,
+                "subtopic": "",
+                "key_points": framework[idx] if idx < len(framework) else "待根据文献内容补充。",
+            }
+        )
+    return defaults
+
+
+def add_main_content_slide(prs: Presentation, analysis: Dict[str, Any], index: int):
+    slide = blank_slide(prs)
+    reference_header(slide, index, analysis.get("document_title", "Untitled"))
+    add_textbox(
+        slide,
+        "写作主要内容",
+        Inches(0.05),
+        Inches(0.86),
+        Inches(4.6),
+        Inches(0.35),
+        size=18,
+        bold=True,
+    )
+
+    sections = default_sections(analysis)
+    rows = len(sections) + 1
+    table_shape = slide.shapes.add_table(
+        rows,
+        3,
+        Inches(0.05),
+        Inches(1.25),
+        Inches(13.0),
+        Inches(5.95),
+    )
+    table = table_shape.table
+    table.columns[0].width = Inches(1.55)
+    table.columns[1].width = Inches(1.35)
+    table.columns[2].width = Inches(10.1)
+    table.rows[0].height = Inches(0.95)
+
+    format_cell(table.cell(0, 0), "核心内容", BLUE, WHITE, size=14, bold=True)
+    format_cell(table.cell(0, 1), "", BLUE, WHITE, size=14, bold=True)
+    format_cell(
+        table.cell(0, 2),
+        compact_text(analysis.get("main_content", ""), 260),
+        BLUE,
+        WHITE,
+        size=13,
+        bold=True,
+    )
+
+    for row_idx, section in enumerate(sections, start=1):
+        fill = LIGHT_BLUE if row_idx % 2 else MID_BLUE
+        table.rows[row_idx].height = Inches(0.72)
+        format_cell(table.cell(row_idx, 0), section.get("section_name", ""), fill, size=13)
+        format_cell(table.cell(row_idx, 1), section.get("subtopic", ""), fill, size=12)
+        format_cell(
+            table.cell(row_idx, 2),
+            compact_text(section.get("key_points", ""), 210),
+            fill,
+            size=13,
+        )
+
+
+def add_picture_fit(slide, image_bytes: bytes, left, top, width, height):
+    image = Image.open(BytesIO(image_bytes))
+    pixel_width, pixel_height = image.size
+    if not pixel_width or not pixel_height:
+        return
+
+    frame_ratio = width / height
+    image_ratio = pixel_width / pixel_height
+    if image_ratio >= frame_ratio:
+        final_width = width
+        final_height = int(width / image_ratio)
+    else:
+        final_height = height
+        final_width = int(height * image_ratio)
+
+    final_left = left + int((width - final_width) / 2)
+    final_top = top + int((height - final_height) / 2)
+    stream = BytesIO(image_bytes)
+    stream.seek(0)
+    slide.shapes.add_picture(stream, final_left, final_top, width=final_width, height=final_height)
+
+
+def add_figure_slide(
+    prs: Presentation,
+    analysis: Dict[str, Any],
+    index: int,
+    figures: List[Dict[str, Any]],
+    chunk_index: int,
+):
+    slide = blank_slide(prs)
+    title = analysis.get("document_title", "Untitled")
+    reference_header(slide, index, f"{title} - 关键图表解析 {chunk_index}")
+
+    preview_images = analysis.get("preview_images") or []
+    image_left = Inches(0.25)
+    if preview_images:
+        for i, item in enumerate(preview_images[:2]):
+            top = Inches(0.85 + i * 3.15)
+            label = figures[i].get("figure_id", f"fig{i + 1}") if i < len(figures) else f"fig{i + 1}"
+            add_textbox(slide, label, image_left, top - Inches(0.38), Inches(1.0), Inches(0.3), size=15, bold=True)
+            add_picture_fit(slide, item["data"], image_left, top, Inches(6.65), Inches(2.72))
+    else:
+        add_rect(slide, image_left, Inches(1.15), Inches(6.65), Inches(5.7), LIGHT_BLUE)
+        add_textbox(
+            slide,
+            "未生成页面预览图\n可在 PPT 选项中勾选嵌入 PDF 页面预览",
+            image_left + Inches(0.45),
+            Inches(3.25),
+            Inches(5.75),
+            Inches(0.8),
+            size=18,
+            bold=True,
+            color=MUTED,
+            align=PP_ALIGN.CENTER,
+        )
+
+    table_shape = slide.shapes.add_table(
+        len(figures) + 1,
+        3,
+        Inches(7.4),
+        Inches(1.18),
+        Inches(5.65),
+        Inches(5.75),
+    )
+    table = table_shape.table
+    table.columns[0].width = Inches(1.25)
+    table.columns[1].width = Inches(1.65)
+    table.columns[2].width = Inches(2.75)
+    headers = ["主要图示/表", "代表的图示/表格内容", "图示设计目的"]
+    for col, header in enumerate(headers):
+        format_cell(table.cell(0, col), header, BLUE, WHITE, size=13, bold=True)
+    table.rows[0].height = Inches(0.7)
+
+    for row_idx, fig in enumerate(figures, start=1):
+        fill = LIGHT_BLUE if row_idx % 2 else PALE_BLUE
+        table.rows[row_idx].height = Inches(2.1)
+        format_cell(table.cell(row_idx, 0), fig.get("figure_id", ""), fill, size=16)
+        format_cell(table.cell(row_idx, 1), compact_text(fig.get("content_summary", ""), 110), fill, size=12)
+        format_cell(table.cell(row_idx, 2), compact_text(fig.get("design_purpose", ""), 95), fill, size=12)
+
+
+def build_pptx_bytes(analyses: List[Dict[str, Any]]) -> bytes:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    add_title_slide(prs)
+
+    for index, analysis in enumerate(analyses, start=1):
+        add_main_content_slide(prs, analysis, index)
+        figures = analysis.get("figures_analysis") or []
+        if not figures:
+            figures = [
+                {
+                    "figure_id": "fig1",
+                    "content_summary": "模型未提取到明确图表，可根据 PDF 预览页人工补充。",
+                    "design_purpose": "辅助快速定位关键图表。",
+                }
+            ]
+        for chunk_index, chunk in enumerate(chunked(figures, 2), start=1):
+            add_figure_slide(prs, analysis, index, chunk, chunk_index)
+
+    output = BytesIO()
+    prs.save(output)
+    output.seek(0)
+    return output.getvalue()

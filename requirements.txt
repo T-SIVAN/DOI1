@@ -5,3 +5,4 @@ pdfplumber
 pypdf
 pypdfium2
 pillow
+python-pptx
