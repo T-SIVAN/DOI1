@@ -44,6 +44,16 @@ PDF_IMAGE_RENDER_SCALE = 1.6
 PDF_IMAGE_JPEG_QUALITY = 72
 PDF_IMAGE_MAX_BYTES = 1_200_000
 PPT_ANALYSIS_MAX_CHARS = 18000
+JOURNAL_IMPACT_FACTORS = {
+    "nature biotechnology": {
+        "if": "44.5",
+        "note": "2025 JCR / Nature Journal Metrics",
+    },
+    "nat biotechnol": {
+        "if": "44.5",
+        "note": "2025 JCR / Nature Journal Metrics",
+    },
+}
 
 OUTPUT_COLUMNS = [
     "文献标题",
@@ -225,7 +235,31 @@ def normalize_identifier(value: str) -> str:
 def normalize_doi(value: str) -> str:
     cleaned = normalize_identifier(value)
     cleaned = re.sub(r"^https?://(dx\.)?doi\.org/", "", cleaned, flags=re.I)
+    cleaned = cleaned.strip().rstrip(").,;]")
     return cleaned
+
+
+def extract_doi_from_text(text: Any) -> str:
+    match = re.search(r"(?i)\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", str(text or ""))
+    return normalize_doi(match.group(0)) if match else ""
+
+
+def normalize_journal_name(value: Any) -> str:
+    text = strip_markup(value).lower()
+    text = re.sub(r"[^a-z0-9& ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def lookup_impact_factor(journal_name: Any) -> Dict[str, str]:
+    normalized = normalize_journal_name(journal_name)
+    if not normalized:
+        return {"if": "待核验", "note": "未识别期刊名"}
+
+    for key, value in JOURNAL_IMPACT_FACTORS.items():
+        key_norm = normalize_journal_name(key)
+        if normalized == key_norm or key_norm in normalized or normalized in key_norm:
+            return value
+    return {"if": "待核验", "note": "未在本地 IF 映射表中找到，请按 JCR/期刊官网核验"}
 
 
 def is_openalex_id(value: str) -> bool:
@@ -1025,6 +1059,7 @@ def extract_pdf_with_pymupdf4llm(pdf_bytes: bytes) -> Dict[str, Any]:
             "parser": "PyMuPDF4LLM",
             "markdown": compact_text(markdown, 28000),
             "sections": sections,
+            "doi": extract_doi_from_text(markdown),
             "figure_table_legends": figure_table_legends,
             "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]]
             or extract_figure_table_clues(markdown),
@@ -1062,6 +1097,7 @@ def extract_pdf_with_docling(pdf_bytes: bytes) -> Dict[str, Any]:
             "parser": "Docling",
             "markdown": compact_text(markdown, 32000),
             "sections": sections,
+            "doi": extract_doi_from_text(markdown),
             "figure_table_legends": figure_table_legends,
             "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]]
             or extract_figure_table_clues(markdown),
@@ -1084,6 +1120,7 @@ def build_pdf_content_from_text(text: str, mode: str, parser: str, status: str) 
         "parser": parser,
         "markdown": compact_text(text, 28000),
         "sections": sections,
+        "doi": extract_doi_from_text(text),
         "figure_table_legends": figure_table_legends,
         "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]] or extract_figure_table_clues(text),
         "evidence_level": "全文结构推断" if sections else "核心页文本",
@@ -1880,6 +1917,10 @@ def parse_json_object(text: str) -> Dict[str, Any]:
 
 def normalize_ppt_analysis(data: Dict[str, Any], fallback_title: str) -> Dict[str, Any]:
     title = strip_markup(data.get("document_title")) or fallback_title
+    journal_name = strip_markup(data.get("journal_name"))
+    doi = normalize_doi(strip_markup(data.get("doi")))
+    impact_factor = strip_markup(data.get("impact_factor"))
+    impact_factor_note = strip_markup(data.get("impact_factor_note"))
     main_content = strip_markup(data.get("main_content")) or "模型未能提取核心内容。"
     framework = data.get("writing_framework") or []
     if not isinstance(framework, list):
@@ -1911,6 +1952,10 @@ def normalize_ppt_analysis(data: Dict[str, Any], fallback_title: str) -> Dict[st
 
     return {
         "document_title": title,
+        "journal_name": journal_name,
+        "doi": doi,
+        "impact_factor": impact_factor,
+        "impact_factor_note": impact_factor_note,
         "main_content": main_content,
         "writing_framework": [strip_markup(x) for x in framework if strip_markup(x)],
         "main_content_sections": sections,
@@ -1938,6 +1983,7 @@ def analyze_pdf_for_ppt(
 ) -> Dict[str, Any]:
     content = extract_pdf_content(pdf_bytes, parse_mode)
     prompt_text = pdf_content_to_prompt_text(content, PPT_ANALYSIS_MAX_CHARS)
+    extracted_doi = content.get("doi") or ""
     figure_table_legends = content.get("figure_table_legends") or []
     system_prompt = "你是擅长科研文献汇报、专利技术拆解和中文 PPT 结构化表达的学术报告设计师。"
     user_prompt = f"""
@@ -1946,6 +1992,8 @@ def analyze_pdf_for_ppt(
 JSON 字段：
 {{
   "document_title": "文献或专利完整标题",
+  "journal_name": "期刊或来源名称；专利则写专利来源/公开机构，无法识别写空字符串",
+  "doi": "文献 DOI；没有 DOI 或无法识别写空字符串，不要编造",
   "main_content": "2-4 句核心内容总结，说明技术亮点、痛点和结论",
   "writing_framework": ["背景与痛点", "核心原理", "验证路线", "应用", "总结讨论"],
   "main_content_sections": [
@@ -1968,6 +2016,7 @@ JSON 字段：
 2. figures_analysis 必须优先使用“全文图例/图注”中的图表编号和图注内容，不要把整页 PDF 截图当作图表内容。
 3. figures_analysis 只保留最关键的图/表，最多 8 项；如果图注里有 Fig. 1、Fig. 2、Table 1 等，请保持这些编号。
 4. 不确定的内容要写“未在文本中明确给出”，不要编造 DOI、数值或实验结论。
+5. document_title 必须是文章完整英文题名，不要只写短标题；doi 只能使用 PDF 文本中明确出现的 DOI。
 
 文件名：{file_name}
 
@@ -1984,6 +2033,13 @@ PDF 内容：
         timeout=180,
     )
     analysis = normalize_ppt_analysis(parse_json_object(result), fallback_title=file_name)
+    if extracted_doi:
+        analysis["doi"] = extracted_doi
+    if not analysis.get("doi"):
+        analysis["doi"] = "待核验"
+    impact = lookup_impact_factor(analysis.get("journal_name"))
+    analysis["impact_factor"] = impact["if"]
+    analysis["impact_factor_note"] = impact["note"]
     analysis["figure_table_legends"] = figure_table_legends
     return analysis
 

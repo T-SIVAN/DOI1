@@ -139,17 +139,42 @@ def add_title_slide(prs: Presentation):
     )
 
 
-def reference_header(slide, index: int, title: str):
+def reference_header(slide, index: int, analysis: Dict[str, Any], suffix: str = ""):
+    title = analysis.get("document_title", "Untitled")
+    subtitle_parts = []
+    if analysis.get("journal_name"):
+        subtitle_parts.append(str(analysis.get("journal_name")))
+    if analysis.get("doi"):
+        subtitle_parts.append(f"DOI: {analysis.get('doi')}")
+    if analysis.get("impact_factor"):
+        if_note = analysis.get("impact_factor_note")
+        suffix_note = f" ({if_note})" if if_note and str(if_note).lower() not in {"none", "待核验"} else ""
+        subtitle_parts.append(f"IF: {analysis.get('impact_factor')}{suffix_note}")
+    title_text = f"文献{index}. {compact_text(title, 190)}"
+    if suffix:
+        title_text = f"{title_text} - {suffix}"
     add_textbox(
         slide,
-        f"文献{index}. {compact_text(title, 145)}",
+        title_text,
         Inches(0.55),
-        Inches(0.22),
+        Inches(0.12),
         Inches(12.25),
-        Inches(0.45),
+        Inches(0.32),
         size=14,
+        bold=True,
         color=BLACK,
     )
+    if subtitle_parts:
+        add_textbox(
+            slide,
+            compact_text(" | ".join(subtitle_parts), 210),
+            Inches(0.55),
+            Inches(0.48),
+            Inches(12.25),
+            Inches(0.28),
+            size=9,
+            color=MUTED,
+        )
 
 
 def default_sections(analysis: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -179,12 +204,12 @@ def default_sections(analysis: Dict[str, Any]) -> List[Dict[str, str]]:
 
 def add_main_content_slide(prs: Presentation, analysis: Dict[str, Any], index: int):
     slide = blank_slide(prs)
-    reference_header(slide, index, analysis.get("document_title", "Untitled"))
+    reference_header(slide, index, analysis)
     add_textbox(
         slide,
         "写作主要内容",
         Inches(0.05),
-        Inches(0.86),
+        Inches(0.94),
         Inches(4.6),
         Inches(0.35),
         size=18,
@@ -197,9 +222,9 @@ def add_main_content_slide(prs: Presentation, analysis: Dict[str, Any], index: i
         rows,
         3,
         Inches(0.05),
-        Inches(1.25),
+        Inches(1.32),
         Inches(13.0),
-        Inches(5.95),
+        Inches(5.88),
     )
     table = table_shape.table
     table.columns[0].width = Inches(1.55)
@@ -293,27 +318,26 @@ def add_figure_slide(
     chunk_index: int,
 ):
     slide = blank_slide(prs)
-    title = analysis.get("document_title", "Untitled")
-    reference_header(slide, index, f"{title} - 关键图表解析 {chunk_index}")
+    reference_header(slide, index, analysis, f"关键图表解析 {chunk_index}")
 
     preview_images = analysis.get("preview_images") or []
     image_left = Inches(0.25)
     if preview_images:
         for i, item in enumerate(preview_images[:2]):
-            top = Inches(0.85 + i * 3.15)
+            top = Inches(0.95 + i * 3.05)
             label = figures[i].get("figure_id", f"fig{i + 1}") if i < len(figures) else f"fig{i + 1}"
             add_textbox(slide, label, image_left, top - Inches(0.38), Inches(1.0), Inches(0.3), size=15, bold=True)
-            add_picture_fit(slide, item["data"], image_left, top, Inches(6.65), Inches(2.72))
+            add_picture_fit(slide, item["data"], image_left, top, Inches(6.65), Inches(2.6))
     else:
-        add_caption_panel(slide, figures, analysis, image_left, Inches(0.85), Inches(6.65), Inches(6.05))
+        add_caption_panel(slide, figures, analysis, image_left, Inches(0.95), Inches(6.65), Inches(5.95))
 
     table_shape = slide.shapes.add_table(
         len(figures) + 1,
         3,
         Inches(7.4),
-        Inches(1.18),
+        Inches(1.28),
         Inches(5.65),
-        Inches(5.75),
+        Inches(5.65),
     )
     table = table_shape.table
     table.columns[0].width = Inches(1.25)
