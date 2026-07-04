@@ -889,7 +889,83 @@ def extract_sections_from_text(text: str) -> Dict[str, str]:
     return sections
 
 
+FIGURE_TABLE_MARKER_RE = re.compile(
+    r"(?im)(?:^|\n)\s*("
+    r"(?:Extended\s+Data\s+Fig(?:ure)?|Supplementary\s+Fig(?:ure)?|Supplementary\s+Table|"
+    r"Fig(?:ure)?|Table|Scheme)"
+    r"\.?\s*[A-Za-z]?\d+[A-Za-z]?(?:[-–]\d+[A-Za-z]?)?"
+    r")\s*[:.|：\-–]?\s*"
+)
+
+
+def normalize_figure_id(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().rstrip(".:：|-–")
+    text = re.sub(r"(?i)^figure\b", "Fig.", text)
+    text = re.sub(r"(?i)^fig\b(?!\.)", "Fig.", text)
+    text = re.sub(r"(?i)^table\b", "Table", text)
+    text = re.sub(r"(?i)^scheme\b", "Scheme", text)
+    return text
+
+
+def figure_id_key(value: Any) -> str:
+    text = normalize_figure_id(value).lower()
+    text = text.replace("figure", "fig")
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def extract_page_number_near(text: str, position: int) -> str:
+    prefix = text[:position]
+    matches = list(re.finditer(r"\[Page\s+(\d+)\]", prefix, flags=re.I))
+    return matches[-1].group(1) if matches else ""
+
+
+def trim_caption_segment(segment: str, max_chars: int = 1600) -> str:
+    segment = re.sub(r"\[Page\s+\d+\]", " ", segment, flags=re.I)
+    segment = re.sub(r"\s+", " ", segment).strip()
+    segment = re.sub(
+        r"(?i)\s+(references|acknowledg(?:e)?ments|author contributions|competing interests|methods)\s+.*$",
+        "",
+        segment,
+    ).strip()
+    return compact_text(segment, max_chars)
+
+
+def extract_figure_table_legends(text: str, max_items: int = 80) -> List[Dict[str, str]]:
+    raw_text = text or ""
+    matches = list(FIGURE_TABLE_MARKER_RE.finditer(raw_text))
+    legends: List[Dict[str, str]] = []
+    seen: set[str] = set()
+
+    for index, match in enumerate(matches):
+        figure_id = normalize_figure_id(match.group(1))
+        key = figure_id_key(figure_id)
+        if not key or key in seen:
+            continue
+
+        next_start = matches[index + 1].start(1) if index + 1 < len(matches) else len(raw_text)
+        segment = raw_text[match.start(1) : min(next_start, match.start(1) + 2200)]
+        caption = trim_caption_segment(segment)
+        if len(caption) < len(figure_id) + 20:
+            continue
+
+        seen.add(key)
+        legends.append(
+            {
+                "figure_id": figure_id,
+                "caption": caption,
+                "page": extract_page_number_near(raw_text, match.start(1)),
+            }
+        )
+        if len(legends) >= max_items:
+            break
+    return legends
+
+
 def extract_figure_table_clues(text: str, max_items: int = 18) -> List[str]:
+    legends = extract_figure_table_legends(text, max_items=max_items)
+    if legends:
+        return [item["caption"] for item in legends]
+
     clues: List[str] = []
     for match in re.finditer(r"(?is)\b(?:fig(?:ure)?\.?\s*\d+[a-z]?|table\s*\d+[a-z]?)\b.{0,700}", text or ""):
         clue = normalize_pdf_text(match.group(0), 900)
@@ -900,7 +976,7 @@ def extract_figure_table_clues(text: str, max_items: int = 18) -> List[str]:
     return clues
 
 
-def pypdf_extract_full_text(pdf_bytes: bytes, max_pages: int = 40) -> str:
+def pypdf_extract_full_text(pdf_bytes: bytes, max_pages: Optional[int] = None) -> str:
     try:
         from pypdf import PdfReader
     except ImportError as exc:
@@ -909,7 +985,8 @@ def pypdf_extract_full_text(pdf_bytes: bytes, max_pages: int = 40) -> str:
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
         page_texts: List[str] = []
-        for page_index, page in enumerate(reader.pages[:max_pages], start=1):
+        pages = reader.pages if max_pages is None else reader.pages[:max_pages]
+        for page_index, page in enumerate(pages, start=1):
             text = page.extract_text() or ""
             if text.strip():
                 page_texts.append(f"[Page {page_index}]\n{text}")
@@ -942,12 +1019,15 @@ def extract_pdf_with_pymupdf4llm(pdf_bytes: bytes) -> Dict[str, Any]:
         if not markdown:
             raise ApiError("PyMuPDF4LLM 未返回有效 Markdown。")
         sections = extract_sections_from_text(markdown)
+        figure_table_legends = extract_figure_table_legends(markdown)
         return {
             "mode": PDF_PARSE_ENHANCED,
             "parser": "PyMuPDF4LLM",
             "markdown": compact_text(markdown, 28000),
             "sections": sections,
-            "figure_table_clues": extract_figure_table_clues(markdown),
+            "figure_table_legends": figure_table_legends,
+            "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]]
+            or extract_figure_table_clues(markdown),
             "evidence_level": "增强解析",
             "status": "PyMuPDF4LLM Markdown 解析成功",
         }
@@ -976,12 +1056,15 @@ def extract_pdf_with_docling(pdf_bytes: bytes) -> Dict[str, Any]:
         document = result.document
         markdown = document.export_to_markdown()
         sections = extract_sections_from_text(markdown)
+        figure_table_legends = extract_figure_table_legends(markdown)
         return {
             "mode": PDF_PARSE_STRUCTURED,
             "parser": "Docling",
             "markdown": compact_text(markdown, 32000),
             "sections": sections,
-            "figure_table_clues": extract_figure_table_clues(markdown),
+            "figure_table_legends": figure_table_legends,
+            "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]]
+            or extract_figure_table_clues(markdown),
             "evidence_level": "结构化解析",
             "status": "Docling 结构化解析成功",
         }
@@ -995,12 +1078,14 @@ def extract_pdf_with_docling(pdf_bytes: bytes) -> Dict[str, Any]:
 
 def build_pdf_content_from_text(text: str, mode: str, parser: str, status: str) -> Dict[str, Any]:
     sections = extract_sections_from_text(text)
+    figure_table_legends = extract_figure_table_legends(text)
     return {
         "mode": mode,
         "parser": parser,
         "markdown": compact_text(text, 28000),
         "sections": sections,
-        "figure_table_clues": extract_figure_table_clues(text),
+        "figure_table_legends": figure_table_legends,
+        "figure_table_clues": [item["caption"] for item in figure_table_legends[:18]] or extract_figure_table_clues(text),
         "evidence_level": "全文结构推断" if sections else "核心页文本",
         "status": status,
     }
@@ -1049,6 +1134,13 @@ def pdf_content_to_prompt_text(content: Dict[str, Any], max_chars: int = 18000) 
         f"证据等级：{content.get('evidence_level', '')}",
         f"解析状态：{content.get('status', '')}",
     ]
+    legends = content.get("figure_table_legends") or []
+    if legends:
+        parts.append("\n全文图例/图注：")
+        for item in legends[:30]:
+            page = f" Page {item.get('page')}" if item.get("page") else ""
+            parts.append(f"- {item.get('figure_id', '')}{page}: {item.get('caption', '')}")
+
     if sections:
         parts.append("结构化片段：")
         for name, section_text in sections.items():
@@ -1823,6 +1915,7 @@ def normalize_ppt_analysis(data: Dict[str, Any], fallback_title: str) -> Dict[st
         "writing_framework": [strip_markup(x) for x in framework if strip_markup(x)],
         "main_content_sections": sections,
         "figures_analysis": figures,
+        "figure_table_legends": data.get("figure_table_legends") or [],
     }
 
 
@@ -1845,6 +1938,7 @@ def analyze_pdf_for_ppt(
 ) -> Dict[str, Any]:
     content = extract_pdf_content(pdf_bytes, parse_mode)
     prompt_text = pdf_content_to_prompt_text(content, PPT_ANALYSIS_MAX_CHARS)
+    figure_table_legends = content.get("figure_table_legends") or []
     system_prompt = "你是擅长科研文献汇报、专利技术拆解和中文 PPT 结构化表达的学术报告设计师。"
     user_prompt = f"""
 请阅读以下 PDF 文献/专利内容，输出严格 JSON，不要输出 Markdown 或解释文字。
@@ -1864,15 +1958,16 @@ JSON 字段：
     {{"section_name": "实验与分析方法", "subtopic": "", "key_points": "..."}}
   ],
   "figures_analysis": [
-    {{"figure_id": "fig1", "content_summary": "图中展示的代表内容", "design_purpose": "图的设计目的"}},
-    {{"figure_id": "fig2", "content_summary": "图中展示的代表内容", "design_purpose": "图的设计目的"}}
+    {{"figure_id": "Fig. 1", "content_summary": "依据图注概括图中展示的代表内容", "design_purpose": "结合正文和图注解释图的设计目的"}},
+    {{"figure_id": "Fig. 2", "content_summary": "依据图注概括图中展示的代表内容", "design_purpose": "结合正文和图注解释图的设计目的"}}
   ]
 }}
 
 要求：
 1. main_content_sections 尽量生成 5-7 行，文字短、信息密度高，适合蓝色表格 PPT。
-2. figures_analysis 只保留最关键的图/表，最多 6 项。
-3. 不确定的内容要写“未在文本中明确给出”，不要编造 DOI、数值或实验结论。
+2. figures_analysis 必须优先使用“全文图例/图注”中的图表编号和图注内容，不要把整页 PDF 截图当作图表内容。
+3. figures_analysis 只保留最关键的图/表，最多 8 项；如果图注里有 Fig. 1、Fig. 2、Table 1 等，请保持这些编号。
+4. 不确定的内容要写“未在文本中明确给出”，不要编造 DOI、数值或实验结论。
 
 文件名：{file_name}
 
@@ -1888,12 +1983,14 @@ PDF 内容：
         user_prompt=user_prompt,
         timeout=180,
     )
-    return normalize_ppt_analysis(parse_json_object(result), fallback_title=file_name)
+    analysis = normalize_ppt_analysis(parse_json_object(result), fallback_title=file_name)
+    analysis["figure_table_legends"] = figure_table_legends
+    return analysis
 
 
 def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
     st.subheader("PPT汇报")
-    st.caption("上传多篇论文/专利 PDF，自动生成蓝色表格模板 PowerPoint。")
+    st.caption("上传多篇论文/专利 PDF，优先读取全文图例/图注，并自动生成蓝色表格模板 PowerPoint。")
 
     with st.container(border=True):
         col_a, col_b, col_c = st.columns([1.2, 0.9, 0.9])
@@ -1910,7 +2007,7 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
                 [PDF_PARSE_ENHANCED, PDF_PARSE_FAST, PDF_PARSE_STRUCTURED],
                 key="ppt_parse_mode",
             )
-            include_preview = st.checkbox("嵌入前两页预览图", value=True, key="ppt_include_preview")
+            include_preview = st.checkbox("备用：嵌入整页预览图", value=False, key="ppt_include_preview")
         with col_c:
             output_name = st.text_input(
                 "输出文件名",
@@ -1920,7 +2017,7 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
             if not output_name.lower().endswith(".pptx"):
                 output_name += ".pptx"
 
-    st.info("版式为内置 PPT 格式：白底、蓝色表头、浅蓝内容表格、图文左右布局，不需要额外 PPT 模板文件。")
+    st.info("版式为内置 PPT 格式：默认把全文 Fig./Table/Scheme 图注整理到图表页左侧；只有勾选备用预览时才嵌入整页 PDF 截图。")
     start = st.button("生成 PPT", type="primary", use_container_width=True, key="ppt_generate")
 
     if not start:
@@ -1951,6 +2048,11 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
             if include_preview:
                 analysis["preview_images"] = preview_images_from_pdf(pdf_bytes, 2)
             analyses.append(analysis)
+            legend_count = len(analysis.get("figure_table_legends") or [])
+            if legend_count:
+                st.caption(f"{uploaded.name} 已读取到 {legend_count} 条图例/图注。")
+            else:
+                st.caption(f"{uploaded.name} 未从文本层读取到明确图例/图注，可尝试结构化模式或 OCR 后再上传。")
             progress.progress(idx / len(uploaded_files), text=f"已完成 {idx}/{len(uploaded_files)}")
         except Exception as exc:
             st.error(f"{uploaded.name} 解析失败：{exc}")

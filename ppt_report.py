@@ -32,6 +32,19 @@ def chunked(items: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, A
         yield items[start : start + size]
 
 
+def figure_key(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def caption_for_figure(analysis: Dict[str, Any], figure_id: Any) -> str:
+    target = figure_key(figure_id)
+    for item in analysis.get("figure_table_legends") or []:
+        current = figure_key(item.get("figure_id"))
+        if current and (current == target or current in target or target in current):
+            return str(item.get("caption") or "")
+    return ""
+
+
 def blank_slide(prs: Presentation):
     return prs.slides.add_slide(prs.slide_layouts[6])
 
@@ -240,6 +253,38 @@ def add_picture_fit(slide, image_bytes: bytes, left, top, width, height):
     slide.shapes.add_picture(stream, final_left, final_top, width=final_width, height=final_height)
 
 
+def add_caption_panel(slide, figures: List[Dict[str, Any]], analysis: Dict[str, Any], left, top, width, height):
+    add_textbox(slide, "图例/图注摘录", left, top, width, Inches(0.32), size=16, bold=True)
+    panel_top = top + Inches(0.42)
+    panel_height = (height - Inches(0.5)) / max(len(figures), 1)
+
+    for row_idx, fig in enumerate(figures):
+        item_top = panel_top + row_idx * panel_height
+        fill = LIGHT_BLUE if row_idx % 2 == 0 else PALE_BLUE
+        add_rect(slide, left, item_top, width, panel_height - Inches(0.08), fill, WHITE)
+        fig_id = fig.get("figure_id", f"Fig. {row_idx + 1}")
+        caption = caption_for_figure(analysis, fig_id) or fig.get("caption") or fig.get("content_summary") or "未从 PDF 文本层读取到对应图注。"
+        add_textbox(
+            slide,
+            str(fig_id),
+            left + Inches(0.12),
+            item_top + Inches(0.12),
+            Inches(1.05),
+            Inches(0.32),
+            size=15,
+            bold=True,
+        )
+        add_textbox(
+            slide,
+            compact_text(caption, 520),
+            left + Inches(1.15),
+            item_top + Inches(0.1),
+            width - Inches(1.35),
+            panel_height - Inches(0.25),
+            size=12,
+        )
+
+
 def add_figure_slide(
     prs: Presentation,
     analysis: Dict[str, Any],
@@ -260,19 +305,7 @@ def add_figure_slide(
             add_textbox(slide, label, image_left, top - Inches(0.38), Inches(1.0), Inches(0.3), size=15, bold=True)
             add_picture_fit(slide, item["data"], image_left, top, Inches(6.65), Inches(2.72))
     else:
-        add_rect(slide, image_left, Inches(1.15), Inches(6.65), Inches(5.7), LIGHT_BLUE)
-        add_textbox(
-            slide,
-            "未生成页面预览图\n可在 PPT 选项中勾选嵌入 PDF 页面预览",
-            image_left + Inches(0.45),
-            Inches(3.25),
-            Inches(5.75),
-            Inches(0.8),
-            size=18,
-            bold=True,
-            color=MUTED,
-            align=PP_ALIGN.CENTER,
-        )
+        add_caption_panel(slide, figures, analysis, image_left, Inches(0.85), Inches(6.65), Inches(6.05))
 
     table_shape = slide.shapes.add_table(
         len(figures) + 1,
@@ -308,12 +341,22 @@ def build_pptx_bytes(analyses: List[Dict[str, Any]]) -> bytes:
     for index, analysis in enumerate(analyses, start=1):
         add_main_content_slide(prs, analysis, index)
         figures = analysis.get("figures_analysis") or []
+        if not figures and analysis.get("figure_table_legends"):
+            figures = [
+                {
+                    "figure_id": item.get("figure_id", f"Fig. {idx}"),
+                    "caption": item.get("caption", ""),
+                    "content_summary": compact_text(item.get("caption", ""), 110),
+                    "design_purpose": "依据 PDF 图注整理，需结合正文进一步确认展示目的。",
+                }
+                for idx, item in enumerate(analysis.get("figure_table_legends")[:8], start=1)
+            ]
         if not figures:
             figures = [
                 {
                     "figure_id": "fig1",
-                    "content_summary": "模型未提取到明确图表，可根据 PDF 预览页人工补充。",
-                    "design_purpose": "辅助快速定位关键图表。",
+                    "content_summary": "模型未提取到明确图表，可尝试结构化模式或 OCR 后重新上传 PDF。",
+                    "design_purpose": "提示用户补充可读取的图注文本。",
                 }
             ]
         for chunk_index, chunk in enumerate(chunked(figures, 2), start=1):
