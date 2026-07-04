@@ -1467,6 +1467,83 @@ def polish_breakthrough_report(markdown: str) -> str:
     return cleaned.strip()
 
 
+def demote_large_markdown_headings(markdown: str) -> str:
+    lines = []
+    for line in str(markdown or "").splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("# "):
+            lines.append("#### " + stripped[2:].strip())
+        elif stripped.startswith("## "):
+            lines.append("#### " + stripped[3:].strip())
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def extract_markdown_table_rows(markdown: str) -> List[Dict[str, str]]:
+    text = str(markdown or "").replace("｜", "|")
+    normalized_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if "| 年份 |" in line and not line.startswith("|"):
+            line = line[line.find("| 年份 |") :].strip()
+        if line.startswith("|") and not line.endswith("|"):
+            line = f"{line}|"
+        if line.startswith("|") and line.endswith("|"):
+            normalized_lines.append(line)
+    lines = normalized_lines
+    if not lines:
+        return []
+
+    header_index = -1
+    for idx, line in enumerate(lines):
+        if "年份" in line and ("里程碑" in line or "技术突破" in line or "代表文献" in line):
+            header_index = idx
+            break
+    if header_index < 0:
+        return []
+
+    headers = [cell.strip() for cell in lines[header_index].strip("|").split("|")]
+    rows: List[Dict[str, str]] = []
+    for line in lines[header_index + 1 :]:
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if not cells or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        if len(cells) < len(headers):
+            cells.extend([""] * (len(headers) - len(cells)))
+        row = {headers[i]: cells[i] for i in range(min(len(headers), len(cells)))}
+        if any(value for value in row.values()):
+            rows.append(row)
+    return rows
+
+
+def render_breakthrough_result(markdown: str) -> None:
+    st.markdown("### 领域突破表")
+    rows = extract_markdown_table_rows(markdown)
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Breakthroughs")
+        buffer.seek(0)
+        st.download_button(
+            label="下载领域突破 Excel",
+            data=buffer.getvalue(),
+            file_name="field_breakthroughs.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        with st.expander("查看原始 Markdown", expanded=False):
+            st.markdown(markdown)
+            render_markdown_download("下载 Markdown", markdown, "field_breakthroughs.md")
+        return
+
+    st.warning("模型没有返回可识别的标准表格，已显示精简文本。")
+    st.markdown(demote_large_markdown_headings(simplify_markdown_response(markdown, 6000)))
+    render_markdown_download("下载 Markdown", markdown, "field_breakthroughs.md")
+
+
 def analyze_field_breakthroughs(
     step1_report: str,
     pdf_text: str,
@@ -1482,7 +1559,7 @@ def analyze_field_breakthroughs(
 
 请严格按以下 Markdown 结构输出：
 
-# <用 8-18 个字概括细分方向>突破脉络
+**领域方向：** <用 8-18 个字概括细分方向>
 
 **方向概述：** <用不超过 60 字说明该领域过去 10 年的主要演进主线。>
 
@@ -1650,7 +1727,7 @@ def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_ur
         with analysis_tab:
             render_tool_result("单篇文献深度剖析", step1_report, "single_paper_analysis.md")
         with breakthrough_tab:
-            render_tool_result("领域突破表", step2_report, "field_breakthroughs.md")
+            render_breakthrough_result(step2_report)
 
 
 def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: int) -> None:
