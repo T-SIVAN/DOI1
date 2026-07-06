@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
-from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
@@ -27,7 +26,7 @@ def compact_text(value: Any, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "..."
 
 
-def chunked(items: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
+def chunked(items: List[Any], size: int) -> Iterable[List[Any]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
@@ -110,33 +109,114 @@ def format_cell(cell, text, fill, font_color=BLACK, size=13, bold=False):
     set_font(p, size=size, bold=bold, color=font_color)
 
 
-def add_title_slide(prs: Presentation):
+def attachment_title(analysis: Dict[str, Any]) -> str:
+    title = str(analysis.get("document_title") or "").strip()
+    if title and title.lower() not in {"untitled", "none", "null"}:
+        return title
+    return str(analysis.get("source_file") or analysis.get("file_name") or "未命名附件")
+
+
+def attachment_summary(analysis: Dict[str, Any]) -> str:
+    summary = str(analysis.get("main_content") or "").strip()
+    if not summary:
+        sections = analysis.get("main_content_sections") or []
+        summary = "；".join(
+            str(section.get("key_points") or "").strip()
+            for section in sections[:3]
+            if str(section.get("key_points") or "").strip()
+        )
+    if not summary:
+        framework = analysis.get("writing_framework") or []
+        summary = "；".join(str(item).strip() for item in framework[:3] if str(item).strip())
+    return compact_text(summary or "未提取到摘要总结。", 170)
+
+
+def attachment_source(analysis: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    journal = str(analysis.get("journal_name") or "").strip()
+    doi = str(analysis.get("doi") or "").strip()
+    if journal and journal.lower() not in {"none", "null", "待核验"}:
+        parts.append(journal)
+    if doi and doi.lower() not in {"none", "null", "待核验"}:
+        parts.append(f"DOI: {doi}")
+    if parts:
+        return compact_text(" / ".join(parts), 120)
+
+    fallback_values = [
+        analysis.get("journal_name"),
+        analysis.get("doi"),
+        analysis.get("publication_number"),
+        analysis.get("patent_number"),
+        analysis.get("source_file"),
+        analysis.get("file_name"),
+    ]
+    fallback = [str(value).strip() for value in fallback_values if str(value or "").strip()]
+    return compact_text(" / ".join(fallback) or "待补充", 120)
+
+
+def add_attachment_summary_slide(
+    prs: Presentation,
+    indexed_analyses: List[Tuple[int, Dict[str, Any]]],
+    page_index: int,
+    total_count: int,
+) -> None:
     slide = blank_slide(prs)
     add_rect(slide, Inches(0), Inches(0), prs.slide_width, prs.slide_height, WHITE)
-    add_rect(slide, Inches(0.75), Inches(2.25), Inches(11.85), Inches(1.12), BLUE)
+
+    title = "上传附件汇总表" if page_index == 1 else "上传附件汇总表（续）"
     add_textbox(
         slide,
-        "自动化文献与专利结构分析报告",
-        Inches(1.0),
-        Inches(2.45),
-        Inches(11.35),
-        Inches(0.5),
-        size=28,
+        title,
+        Inches(0.68),
+        Inches(0.25),
+        Inches(8.0),
+        Inches(0.42),
+        size=24,
         bold=True,
-        color=WHITE,
-        align=PP_ALIGN.CENTER,
+        color=BLACK,
     )
+
     add_textbox(
         slide,
-        "PDF 自动解析 · 结构化内容表 · 关键图表解读",
-        Inches(1.9),
-        Inches(3.62),
-        Inches(9.55),
-        Inches(0.4),
-        size=18,
+        f"共 {total_count} 个附件，本页 {indexed_analyses[0][0]}-{indexed_analyses[-1][0]}",
+        Inches(9.25),
+        Inches(0.34),
+        Inches(3.35),
+        Inches(0.28),
+        size=10,
         color=MUTED,
-        align=PP_ALIGN.CENTER,
+        align=PP_ALIGN.RIGHT,
     )
+
+    rows = len(indexed_analyses) + 1
+    table_left = Inches(0.69)
+    table_top = Inches(0.92)
+    table_shape = slide.shapes.add_table(
+        rows,
+        4,
+        table_left,
+        table_top,
+        Inches(11.95),
+        Inches(5.95),
+    )
+    table = table_shape.table
+    column_widths = [0.75, 5.2, 3.0, 3.0]
+    for col_idx, width in enumerate(column_widths):
+        table.columns[col_idx].width = Inches(width)
+
+    headers = ["序号", "文献名称", "摘要总结", "来源（DOI/期刊）"]
+    table.rows[0].height = Inches(0.62)
+    for col_idx, header in enumerate(headers):
+        format_cell(table.cell(0, col_idx), header, BLUE, WHITE, size=13, bold=True)
+
+    body_height = 5.1 / max(len(indexed_analyses), 1)
+    for row_idx, (original_index, analysis) in enumerate(indexed_analyses, start=1):
+        fill = LIGHT_BLUE if row_idx % 2 else PALE_BLUE
+        table.rows[row_idx].height = Inches(body_height)
+        format_cell(table.cell(row_idx, 0), str(original_index), fill, size=12, bold=True)
+        format_cell(table.cell(row_idx, 1), compact_text(attachment_title(analysis), 155), fill, size=10)
+        format_cell(table.cell(row_idx, 2), attachment_summary(analysis), fill, size=9)
+        format_cell(table.cell(row_idx, 3), attachment_source(analysis), fill, size=9)
 
 
 def reference_header(slide, index: int, analysis: Dict[str, Any], suffix: str = ""):
@@ -256,28 +336,6 @@ def add_main_content_slide(prs: Presentation, analysis: Dict[str, Any], index: i
         )
 
 
-def add_picture_fit(slide, image_bytes: bytes, left, top, width, height):
-    image = Image.open(BytesIO(image_bytes))
-    pixel_width, pixel_height = image.size
-    if not pixel_width or not pixel_height:
-        return
-
-    frame_ratio = width / height
-    image_ratio = pixel_width / pixel_height
-    if image_ratio >= frame_ratio:
-        final_width = width
-        final_height = int(width / image_ratio)
-    else:
-        final_height = height
-        final_width = int(height * image_ratio)
-
-    final_left = left + int((width - final_width) / 2)
-    final_top = top + int((height - final_height) / 2)
-    stream = BytesIO(image_bytes)
-    stream.seek(0)
-    slide.shapes.add_picture(stream, final_left, final_top, width=final_width, height=final_height)
-
-
 def add_caption_panel(slide, figures: List[Dict[str, Any]], analysis: Dict[str, Any], left, top, width, height):
     add_textbox(slide, "图例/图注摘录", left, top, width, Inches(0.32), size=16, bold=True)
     panel_top = top + Inches(0.42)
@@ -320,16 +378,8 @@ def add_figure_slide(
     slide = blank_slide(prs)
     reference_header(slide, index, analysis, f"关键图表解析 {chunk_index}")
 
-    preview_images = analysis.get("preview_images") or []
     image_left = Inches(0.25)
-    if preview_images:
-        for i, item in enumerate(preview_images[:2]):
-            top = Inches(0.95 + i * 3.05)
-            label = figures[i].get("figure_id", f"fig{i + 1}") if i < len(figures) else f"fig{i + 1}"
-            add_textbox(slide, label, image_left, top - Inches(0.38), Inches(1.0), Inches(0.3), size=15, bold=True)
-            add_picture_fit(slide, item["data"], image_left, top, Inches(6.65), Inches(2.6))
-    else:
-        add_caption_panel(slide, figures, analysis, image_left, Inches(0.95), Inches(6.65), Inches(5.95))
+    add_caption_panel(slide, figures, analysis, image_left, Inches(0.95), Inches(6.65), Inches(5.95))
 
     table_shape = slide.shapes.add_table(
         len(figures) + 1,
@@ -360,7 +410,10 @@ def build_pptx_bytes(analyses: List[Dict[str, Any]]) -> bytes:
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
-    add_title_slide(prs)
+
+    indexed_analyses = list(enumerate(analyses, start=1))
+    for summary_page, indexed_chunk in enumerate(chunked(indexed_analyses, 6), start=1):
+        add_attachment_summary_slide(prs, indexed_chunk, summary_page, len(analyses))
 
     for index, analysis in enumerate(analyses, start=1):
         add_main_content_slide(prs, analysis, index)

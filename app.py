@@ -2178,14 +2178,6 @@ def normalize_ppt_analysis(data: Dict[str, Any], fallback_title: str) -> Dict[st
     }
 
 
-def preview_images_from_pdf(pdf_bytes: bytes, max_pages: int = 2) -> List[Dict[str, Any]]:
-    try:
-        images = render_core_pdf_pages_as_images(pdf_bytes)
-    except Exception:
-        return []
-    return images[:max_pages]
-
-
 def pdf_looks_image_only(pdf_bytes: bytes) -> bool:
     try:
         import fitz
@@ -2371,7 +2363,7 @@ PDF 内容：
 
 def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
     st.subheader("PPT汇报")
-    st.caption("上传多篇论文/专利 PDF，优先读取全文图例/图注，并自动生成蓝色表格模板 PowerPoint。")
+    st.caption("上传多篇论文/专利 PDF，自动生成同一个 PowerPoint，并在首页汇总全部附件。")
 
     with st.container(border=True):
         col_a, col_b, col_c = st.columns([1.2, 0.9, 0.9])
@@ -2388,7 +2380,6 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
                 [PDF_PARSE_ENHANCED, PDF_PARSE_FAST, PDF_PARSE_STRUCTURED],
                 key="ppt_parse_mode",
             )
-            include_preview = st.checkbox("备用：嵌入整页预览图", value=False, key="ppt_include_preview")
         with col_c:
             output_name = st.text_input(
                 "输出文件名",
@@ -2398,7 +2389,7 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
             if not output_name.lower().endswith(".pptx"):
                 output_name += ".pptx"
 
-    st.info("版式为内置 PPT 格式：默认把全文 Fig./Table/Scheme 图注整理到图表页左侧；只有勾选备用预览时才嵌入整页 PDF 截图。")
+    st.info("版式为内置 PPT 格式：第一页为上传附件汇总表，后续页面按文献展示写作主要内容和关键图表/图注解析。")
     start = st.button("生成 PPT", type="primary", use_container_width=True, key="ppt_generate")
 
     if not start:
@@ -2426,8 +2417,7 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
                 llm_model=llm_model.strip(),
                 parse_mode=parse_mode,
             )
-            if include_preview:
-                analysis["preview_images"] = preview_images_from_pdf(pdf_bytes, 2)
+            analysis["source_file"] = uploaded.name
             analyses.append(analysis)
             legend_count = len(analysis.get("figure_table_legends") or [])
             if legend_count:
