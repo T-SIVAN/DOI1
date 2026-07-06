@@ -4,7 +4,7 @@
 
 ## 功能
 
-- `PDF精读`：上传 PDF，支持快速/增强/结构化解析，以及文本、图片和混合读取，生成单篇文献剖析与近 10 年领域突破追踪。
+- `PDF精读`：上传 PDF，支持快速/增强/结构化解析，以及文本、图片和混合读取，生成单篇文献剖析、标准领域突破表，并直接导出 Word `.docx` 精读报告。
 - `引用追踪`：输入 DOI 或 OpenAlex Paper ID，抓取引用该文献的论文元数据，可尝试开放全文引用上下文，并导出 Excel。
 - `写作工具`：提供润色、章节起草、预投稿审稿、审稿回复、数据可用性声明、文献检索方案、PPT 大纲等文本工具。
 - `PPT汇报`：上传一篇或多篇论文/专利 PDF，自动读取全文 Fig./Table/Scheme 图例与图注，解析核心内容和关键图表，生成内置蓝色表格版式的 `.pptx`；每篇文献标题栏会尽量显示完整题名、DOI 和期刊 IF，不需要额外 PPT 模板文件。
@@ -71,10 +71,9 @@ $env:OPENALEX_MAILTO="your@email.com"
 
 ## 可选增强
 
-PDF 增强解析会自动检测可选库：
+基础依赖已包含 PyMuPDF4LLM；如需进一步结构化解析，可额外安装 Docling：
 
 ```powershell
-pip install pymupdf4llm
 pip install docling
 ```
 
@@ -90,6 +89,7 @@ $env:GROBID_BASE_URL="http://localhost:8070"
 
 - 不要把自己的 LLM API Key 写死在代码里再分享给别人。
 - 图片模式需要 Google Gemini，并且比文本模式更耗模型资源。
+- PDF 精读报告会直接导出 Word `.docx`；领域突破部分会固定渲染为标准表格，不再依赖 Markdown 表格格式。
 - 增强 PDF 解析会优先使用 PyMuPDF4LLM；结构化解析会优先使用 Docling。未安装时会自动降级为本地 pypdf/启发式解析。
 - 引用上下文只处理开放获取 PDF，不绕过付费墙；无开放全文或无法匹配目标 DOI 时会标注为摘要/元数据证据。
 - HTTP 503 通常是模型服务拥堵，不是 PDF 文件问题；可稍后重试或切换模型。

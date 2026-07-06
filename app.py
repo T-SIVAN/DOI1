@@ -73,6 +73,8 @@ OUTPUT_COLUMNS = [
     "解析状态",
 ]
 
+BREAKTHROUGH_COLUMNS = ["年份", "里程碑/技术突破", "代表文献", "DOI", "关键意义"]
+
 NATURE_SKILLS_SOURCE_URL = "https://github.com/Yuan1z0825/nature-skills"
 NATURE_TOOL_CONFIGS = [
     {
@@ -352,7 +354,7 @@ def render_quick_start_guide() -> None:
         with col3:
             st.markdown(
                 "**3. 下载结果**\n\n"
-                "- PDF 精读可下载 Markdown\n"
+                "- PDF 精读可下载 Word 报告\n"
                 "- 引用追踪可下载 Excel\n"
                 "- 云端不会保存你的上传文件"
             )
@@ -1688,31 +1690,219 @@ def extract_markdown_table_rows(markdown: str) -> List[Dict[str, str]]:
     return rows
 
 
-def render_breakthrough_result(markdown: str) -> None:
-    st.markdown("### 领域突破表")
-    rows = extract_markdown_table_rows(markdown)
-    if rows:
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Breakthroughs")
-        buffer.seek(0)
-        st.download_button(
-            label="下载领域突破 Excel",
-            data=buffer.getvalue(),
-            file_name="field_breakthroughs.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-        with st.expander("查看原始 Markdown", expanded=False):
-            st.markdown(markdown)
-            render_markdown_download("下载 Markdown", markdown, "field_breakthroughs.md")
-        return
+def normalize_breakthrough_rows(rows: Any) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    if not isinstance(rows, list):
+        return normalized
 
-    st.warning("模型没有返回可识别的标准表格，已显示精简文本。")
-    st.markdown(demote_large_markdown_headings(simplify_markdown_response(markdown, 6000)))
-    render_markdown_download("下载 Markdown", markdown, "field_breakthroughs.md")
+    key_map = {
+        "年份": ["年份", "year"],
+        "里程碑/技术突破": ["里程碑/技术突破", "里程碑", "技术突破", "milestone", "breakthrough"],
+        "代表文献": ["代表文献", "representative_paper", "paper", "reference"],
+        "DOI": ["DOI", "doi"],
+        "关键意义": ["关键意义", "significance", "meaning", "impact"],
+    }
+
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        row: Dict[str, str] = {}
+        for target, candidates in key_map.items():
+            value = ""
+            for key in candidates:
+                if key in item and item.get(key) is not None:
+                    value = strip_markup(item.get(key))
+                    break
+            row[target] = value or ("未检出" if target == "DOI" else "")
+        if any(row.get(col) for col in BREAKTHROUGH_COLUMNS):
+            normalized.append(row)
+
+    def year_key(row: Dict[str, str]) -> tuple[int, str]:
+        match = re.search(r"\d{4}", row.get("年份", ""))
+        return (int(match.group(0)) if match else 9999, row.get("年份", ""))
+
+    return sorted(normalized, key=year_key)
+
+
+def normalize_breakthrough_report(data: Dict[str, Any]) -> Dict[str, Any]:
+    rows = (
+        data.get("milestones")
+        or data.get("breakthroughs")
+        or data.get("关键里程碑文献")
+        or data.get("rows")
+        or []
+    )
+    keywords = data.get("core_keywords") or data.get("核心关键词") or []
+    if isinstance(keywords, str):
+        keywords = [item.strip() for item in re.split(r"[;；,，、]", keywords) if item.strip()]
+
+    return {
+        "field_direction": strip_markup(data.get("field_direction") or data.get("领域方向")),
+        "direction_overview": strip_markup(data.get("direction_overview") or data.get("方向概述")),
+        "core_keywords": [strip_markup(item) for item in keywords if strip_markup(item)],
+        "milestones": normalize_breakthrough_rows(rows),
+        "usage_note": strip_markup(data.get("usage_note") or data.get("使用提醒") or "DOI 需用 CrossRef/PubMed/出版社页面二次核验。"),
+    }
+
+
+def breakthrough_report_to_dataframe(report: Dict[str, Any]) -> pd.DataFrame:
+    rows = report.get("milestones") or []
+    return pd.DataFrame(rows, columns=BREAKTHROUGH_COLUMNS)
+
+
+def set_docx_run_font(run: Any, size: int = 11, bold: bool = False, color: Optional[str] = None) -> None:
+    from docx.oxml.ns import qn
+    from docx.shared import Pt, RGBColor
+
+    run.font.name = "Arial"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft YaHei")
+    run.font.size = Pt(size)
+    run.bold = bold
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+
+
+def add_docx_paragraph(doc: Any, text: str, *, size: int = 11, bold: bool = False, color: Optional[str] = None) -> Any:
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_after = 6
+    paragraph.paragraph_format.line_spacing = 1.15
+    run = paragraph.add_run(strip_markup(text))
+    set_docx_run_font(run, size=size, bold=bold, color=color)
+    return paragraph
+
+
+def add_docx_heading(doc: Any, text: str, level: int = 1) -> Any:
+    size = 16 if level == 1 else 13
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = 12 if level == 1 else 8
+    paragraph.paragraph_format.space_after = 6
+    run = paragraph.add_run(strip_markup(text))
+    set_docx_run_font(run, size=size, bold=True, color="2E74B5" if level == 1 else "1F4D78")
+    return paragraph
+
+
+def add_markdownish_text_to_docx(doc: Any, text: str) -> None:
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("【") and "】" in line:
+            label, body = line.split("】", 1)
+            add_docx_heading(doc, label.strip("【】"), level=2)
+            if body.strip("：: "):
+                add_docx_paragraph(doc, body.strip("：: "))
+        elif line.startswith(("-", "•")):
+            paragraph = doc.add_paragraph(style=None)
+            paragraph.paragraph_format.left_indent = None
+            paragraph.paragraph_format.space_after = 4
+            run = paragraph.add_run(line.lstrip("-• ").strip())
+            set_docx_run_font(run)
+        else:
+            add_docx_paragraph(doc, line)
+
+
+def set_table_cell_text(cell: Any, text: str, *, bold: bool = False, fill: Optional[str] = None) -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    if fill:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:fill"), fill)
+        tc_pr.append(shd)
+    cell.text = ""
+    paragraph = cell.paragraphs[0]
+    paragraph.paragraph_format.space_after = 0
+    run = paragraph.add_run(strip_markup(text))
+    set_docx_run_font(run, size=9, bold=bold)
+
+
+def add_breakthrough_table_to_docx(doc: Any, report: Dict[str, Any]) -> None:
+    from docx.shared import Inches
+
+    df = breakthrough_report_to_dataframe(report)
+    table = doc.add_table(rows=1, cols=len(BREAKTHROUGH_COLUMNS))
+    table.style = "Table Grid"
+    table.autofit = False
+    widths = [0.55, 1.55, 1.65, 1.35, 1.4]
+
+    for col_idx, column in enumerate(BREAKTHROUGH_COLUMNS):
+        cell = table.rows[0].cells[col_idx]
+        cell.width = Inches(widths[col_idx])
+        set_table_cell_text(cell, column, bold=True, fill="E8EEF5")
+
+    for _, row_data in df.iterrows():
+        cells = table.add_row().cells
+        for col_idx, column in enumerate(BREAKTHROUGH_COLUMNS):
+            cells[col_idx].width = Inches(widths[col_idx])
+            set_table_cell_text(cells[col_idx], str(row_data.get(column, "")))
+
+
+def build_pdf_deep_reading_docx_bytes(
+    step1_report: str,
+    breakthrough_report: Dict[str, Any],
+    *,
+    source_file: str,
+    analysis_source: str,
+) -> bytes:
+    from docx import Document
+    from docx.enum.section import WD_SECTION
+    from docx.shared import Inches
+
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    section.left_margin = Inches(1)
+    section.right_margin = Inches(1)
+
+    title = doc.add_paragraph()
+    title.paragraph_format.space_after = 3
+    title_run = title.add_run("PDF 文献精读报告")
+    set_docx_run_font(title_run, size=22, bold=True)
+    add_docx_paragraph(doc, f"来源文件：{source_file}", size=10, color="555555")
+    add_docx_paragraph(doc, f"读取方式：{analysis_source}", size=10, color="555555")
+
+    add_docx_heading(doc, "单篇文献深度剖析", level=1)
+    add_markdownish_text_to_docx(doc, step1_report)
+
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    add_docx_heading(doc, "领域突破总结", level=1)
+    if breakthrough_report.get("field_direction"):
+        add_docx_paragraph(doc, f"领域方向：{breakthrough_report.get('field_direction')}", bold=True)
+    if breakthrough_report.get("direction_overview"):
+        add_docx_paragraph(doc, f"方向概述：{breakthrough_report.get('direction_overview')}")
+    keywords = breakthrough_report.get("core_keywords") or []
+    if keywords:
+        add_docx_paragraph(doc, "核心关键词：" + "；".join(keywords))
+
+    add_docx_heading(doc, "关键里程碑文献", level=2)
+    add_breakthrough_table_to_docx(doc, breakthrough_report)
+    if breakthrough_report.get("usage_note"):
+        add_docx_paragraph(doc, breakthrough_report.get("usage_note"), size=9, color="555555")
+
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def render_breakthrough_result(report: Dict[str, Any]) -> None:
+    st.markdown("### 领域突破表")
+    if report.get("field_direction"):
+        st.write(f"**领域方向：** {report.get('field_direction')}")
+    if report.get("direction_overview"):
+        st.write(f"**方向概述：** {report.get('direction_overview')}")
+    keywords = report.get("core_keywords") or []
+    if keywords:
+        st.write("**核心关键词：** " + "；".join(keywords))
+
+    df = breakthrough_report_to_dataframe(report)
+    if df.empty:
+        st.info("模型未能生成足够的里程碑条目，可重试或切换模型。")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    if report.get("usage_note"):
+        st.caption(report.get("usage_note"))
 
 
 def analyze_field_breakthroughs(
@@ -1722,37 +1912,34 @@ def analyze_field_breakthroughs(
     llm_provider: str,
     llm_base_url: str,
     llm_model: str,
-) -> str:
+) -> Dict[str, Any]:
     prompt = f"""
 请基于下面的文献剖析报告和论文片段，生成一份“近 10 年领域突破追踪”。
 
-输出必须简洁、专业、无寒暄。不要写“好的”“作为专家”等开场白。
+输出必须是严格 JSON，不要输出 Markdown、表格文本或解释。
 
-请严格按以下 Markdown 结构输出：
+JSON 结构：
+{{
+  "field_direction": "用 8-18 个字概括细分方向",
+  "direction_overview": "不超过 80 字说明过去 10 年演进主线",
+  "core_keywords": ["关键词1", "关键词2", "关键词3", "关键词4", "关键词5"],
+  "milestones": [
+    {{
+      "年份": "2016",
+      "里程碑/技术突破": "简短突破名",
+      "代表文献": "第一作者 et al., 年份, 期刊",
+      "DOI": "未检出",
+      "关键意义": "不超过 80 字的关键意义"
+    }}
+  ],
+  "usage_note": "DOI 需用 CrossRef/PubMed/出版社页面二次核验。"
+}}
 
-**领域方向：** <用 8-18 个字概括细分方向>
-
-**方向概述：** <用不超过 60 字说明该领域过去 10 年的主要演进主线。>
-
-**核心关键词：** 关键词1；关键词2；关键词3；关键词4；关键词5
-
-## 关键里程碑文献
-
-必须输出标准 Markdown 表格，并且第二行必须是分隔行：
-
-| 年份 | 里程碑/技术突破 | 代表文献 | DOI | 关键意义 |
-|---|---|---|---|---|
-| 2016 | 示例 | 示例 | 未检出 | 示例 |
-
-表格要求：
-- 按年份升序。
-- 优先列 6-12 条最关键文献，不要堆砌过多条目。
-- 每格内容控制在 60 字以内。
-- DOI 无法确定时写“未检出”，严禁编造 DOI。
-- 代表文献尽量写“第一作者 et al., 年份, 期刊”。
-
-## 使用提醒
-- DOI 需用 CrossRef/PubMed/出版社页面二次核验。
+要求：
+1. milestones 按年份升序，优先列 6-12 条最关键文献。
+2. 每格内容尽量控制在 80 字以内。
+3. DOI 无法确定时写“未检出”，严禁编造 DOI。
+4. 不要把整个表格塞进一个字符串，milestones 必须是对象数组。
 
 文献剖析报告：
 {step1_report}
@@ -1768,7 +1955,19 @@ def analyze_field_breakthroughs(
         system_prompt="你是一个熟悉生物医药技术史、酶工程、分子检测和基因组技术的专家。",
         user_prompt=prompt,
     )
-    return polish_breakthrough_report(result)
+    try:
+        return normalize_breakthrough_report(parse_json_object(result))
+    except Exception:
+        rows = extract_markdown_table_rows(result)
+        return normalize_breakthrough_report(
+            {
+                "field_direction": "",
+                "direction_overview": simplify_markdown_response(result, 500),
+                "core_keywords": [],
+                "milestones": rows,
+                "usage_note": "模型未返回 JSON，已尝试从文本中恢复表格；DOI 仍需二次核验。",
+            }
+        )
 
 
 def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
@@ -1891,12 +2090,27 @@ def render_pdf_deep_reading_tab(llm_api_key: str, llm_provider: str, llm_base_ur
             return
 
         st.success(f"智能分析完成。实际读取方式：{analysis_source}")
-        full_report = f"# 单篇文献深度剖析\n\n{step1_report}\n\n# 领域突破表\n\n{step2_report}\n"
-        render_markdown_download("下载完整精读报告", full_report, "pdf_deep_reading_report.md")
+        try:
+            word_bytes = build_pdf_deep_reading_docx_bytes(
+                step1_report,
+                step2_report,
+                source_file=uploaded_pdf.name,
+                analysis_source=analysis_source,
+            )
+            st.download_button(
+                "下载 Word 精读报告",
+                data=word_bytes,
+                file_name="pdf_deep_reading_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.warning(f"Word 报告生成失败：{exc}")
 
         analysis_tab, breakthrough_tab = st.tabs(["单篇剖析", "领域突破"])
         with analysis_tab:
-            render_tool_result("单篇文献深度剖析", step1_report, "single_paper_analysis.md")
+            st.markdown("### 单篇文献深度剖析")
+            st.markdown(demote_large_markdown_headings(step1_report))
         with breakthrough_tab:
             render_breakthrough_result(step2_report)
 
