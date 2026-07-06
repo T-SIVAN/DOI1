@@ -89,6 +89,7 @@ $env:GROBID_BASE_URL="http://localhost:8070"
 
 - 不要把自己的 LLM API Key 写死在代码里再分享给别人。
 - 图片模式需要 Google Gemini，并且比文本模式更耗模型资源。
+- 扫描版或图片型专利 PDF 没有文本层，文本解析器会读不到文字；PPT 汇报会在 Google Gemini 下自动转为页面图片识别，使用 OpenAI 兼容文本接口时需先 OCR。
 - PDF 精读报告会直接导出 Word `.docx`；领域突破部分会固定渲染为标准表格，不再依赖 Markdown 表格格式。
 - 增强 PDF 解析会优先使用 PyMuPDF4LLM；结构化解析会优先使用 Docling。未安装时会自动降级为本地 pypdf/启发式解析。
 - 引用上下文只处理开放获取 PDF，不绕过付费墙；无开放全文或无法匹配目标 DOI 时会标注为摘要/元数据证据。

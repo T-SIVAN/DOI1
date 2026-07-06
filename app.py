@@ -2186,6 +2186,94 @@ def preview_images_from_pdf(pdf_bytes: bytes, max_pages: int = 2) -> List[Dict[s
     return images[:max_pages]
 
 
+def pdf_looks_image_only(pdf_bytes: bytes) -> bool:
+    try:
+        import fitz
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        selected = selected_pdf_page_indexes(doc.page_count)
+        text_chars = 0
+        image_pages = 0
+        checked = 0
+        for page_index in selected:
+            page = doc[page_index]
+            text_chars += len((page.get_text() or "").strip())
+            if page.get_images(full=True):
+                image_pages += 1
+            checked += 1
+        return checked > 0 and text_chars < 30 and image_pages >= max(1, checked // 2)
+    except Exception:
+        return False
+
+
+def patent_or_pdf_image_prompt(file_name: str, pages: List[int]) -> str:
+    page_list = "、".join(str(page) for page in pages)
+    return f"""
+请阅读下面的 PDF 页面截图，文件名为 {file_name}，页面范围为第 {page_list} 页。
+该文件可能是扫描版专利或图片型论文，PDF 没有可提取文本层。请根据页面截图进行 OCR 式识别和技术归纳，输出严格 JSON，不要输出 Markdown 或解释文字。
+
+JSON 字段：
+{{
+  "document_title": "文献、专利或申请的完整标题；无法识别时写文件名",
+  "journal_name": "期刊/来源/专利公开机构；专利可写 WIPO/PCT/Google Patents 等",
+  "doi": "文献 DOI；专利或无法识别写空字符串，不要编造",
+  "main_content": "2-4 句核心内容总结，说明技术问题、技术方案和用途",
+  "writing_framework": ["背景与痛点", "核心方案", "关键权利要求/实施例", "验证路线", "应用"],
+  "main_content_sections": [
+    {{"section_name": "核心内容", "subtopic": "", "key_points": "适合放入 PPT 表格的一段话"}},
+    {{"section_name": "背景与痛点", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "核心方案", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "关键权利要求/实施例", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "应用", "subtopic": "", "key_points": "..."}},
+    {{"section_name": "局限与待核验信息", "subtopic": "", "key_points": "..."}}
+  ],
+  "figures_analysis": [
+    {{"figure_id": "Page 1", "content_summary": "该页展示的代表内容", "design_purpose": "该页/图示用于说明什么"}}
+  ]
+}}
+
+要求：
+1. 不确定的申请号、标题、申请人、权利要求或数值必须写“未在截图中明确给出”，不要编造。
+2. 如果截图里是专利首页，请优先提取标题、公开信息、摘要和技术领域。
+3. figures_analysis 最多 6 项，使用 Page/Fig 编号均可。
+""".strip()
+
+
+def analyze_pdf_images_for_ppt(
+    pdf_bytes: bytes,
+    file_name: str,
+    llm_api_key: str,
+    llm_provider: str,
+    llm_base_url: str,
+    llm_model: str,
+) -> Dict[str, Any]:
+    if llm_provider != "Google Gemini":
+        raise ApiError(
+            "该 PDF 是图片型/扫描版，当前文本解析器无法读取文字。"
+            "请在左侧把 LLM 服务商切换为 Google Gemini 后重试，或先对 PDF 做 OCR 再上传。"
+        )
+    images = render_core_pdf_pages_as_images(pdf_bytes)
+    if not images:
+        raise ApiError("扫描版 PDF 未能渲染为页面图片，无法进行图片识别。")
+
+    prompt = patent_or_pdf_image_prompt(file_name, [image["page"] for image in images])
+    result = call_gemini_llm_with_images(
+        llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        system_prompt="你是擅长专利、论文页面 OCR 识别和技术汇报结构化的学术报告设计师。",
+        user_prompt=prompt,
+        images=images,
+        timeout=240,
+    )
+    analysis = normalize_ppt_analysis(parse_json_object(result), fallback_title=file_name)
+    analysis["doi"] = analysis.get("doi") or "待核验"
+    analysis["impact_factor"] = "不适用" if "patent" in file_name.lower() or file_name.upper().startswith("WO") else "待核验"
+    analysis["impact_factor_note"] = "专利/扫描件"
+    analysis["figure_table_legends"] = []
+    return analysis
+
+
 def analyze_pdf_for_ppt(
     pdf_bytes: bytes,
     file_name: str,
@@ -2195,7 +2283,30 @@ def analyze_pdf_for_ppt(
     llm_model: str,
     parse_mode: str,
 ) -> Dict[str, Any]:
-    content = extract_pdf_content(pdf_bytes, parse_mode)
+    if pdf_looks_image_only(pdf_bytes):
+        return analyze_pdf_images_for_ppt(
+            pdf_bytes=pdf_bytes,
+            file_name=file_name,
+            llm_api_key=llm_api_key,
+            llm_provider=llm_provider,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+        )
+
+    try:
+        content = extract_pdf_content(pdf_bytes, parse_mode)
+    except ApiError as exc:
+        message = str(exc)
+        if "未能从 PDF 中提取到文本" in message or "未能从 PDF 中提取到文本" in message or "未能从 PDF 中提取到" in message:
+            return analyze_pdf_images_for_ppt(
+                pdf_bytes=pdf_bytes,
+                file_name=file_name,
+                llm_api_key=llm_api_key,
+                llm_provider=llm_provider,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+            )
+        raise
     prompt_text = pdf_content_to_prompt_text(content, PPT_ANALYSIS_MAX_CHARS)
     extracted_doi = content.get("doi") or ""
     figure_table_legends = content.get("figure_table_legends") or []
