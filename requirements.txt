@@ -6,3 +6,4 @@ pypdf
 pypdfium2
 pillow
 python-pptx
+pymupdf4llm
