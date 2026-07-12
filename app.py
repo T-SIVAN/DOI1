@@ -26,6 +26,7 @@ from literature_search import (
     search_literature,
 )
 from ppt_report import build_pptx_bytes
+from nature_workspace import render_nature_workspace
 
 
 OPENALEX_WORKS = "https://api.openalex.org/works"
@@ -362,7 +363,7 @@ def render_quick_start_guide() -> None:
     st.info(
         "使用前先在左侧填写 LLM API Key。"
         "然后选择下方功能：PDF精读把一篇论文变成结构化读书报告；引用追踪用于输入 DOI/OpenAlex ID 并导出 Excel；"
-        "写作工具用于润色、审稿回复、数据声明和汇报大纲。"
+        "科研写作按任务拆分润色、审稿、引用数据、科研绘图和成果转化。"
     )
     with st.expander("快速使用说明", expanded=True):
         col1, col2, col3 = st.columns(3)
@@ -378,7 +379,7 @@ def render_quick_start_guide() -> None:
                 "**2. 选择功能**\n\n"
                 "- `PDF精读`：生成结构化读书报告\n"
                 "- `引用追踪`：输入 DOI 或 Paper ID\n"
-                "- `写作工具`：粘贴文本并选择任务"
+                "- `科研写作`：选择工作流后再提供材料"
             )
         with col3:
             st.markdown(
@@ -2948,80 +2949,24 @@ def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: 
 
 
 def render_nature_toolbox_tab(llm_api_key: str, llm_provider: str, llm_base_url: str, llm_model: str) -> None:
-    st.subheader("写作工具")
-    st.caption("面向论文写作、投稿审稿、文献数据和成果转化的 LLM 工具箱。")
-    with st.expander("使用说明", expanded=False):
-        st.markdown(
-            f"- 能力设计参考开源项目 [{NATURE_SKILLS_SOURCE_URL}]({NATURE_SKILLS_SOURCE_URL})。\n"
-            "- 当前版本聚焦文本生成和分析，不会自动联网核验 DOI。\n"
-            "- 涉及 DOI、影响因子、期刊分区等信息时，请以数据库核验结果为准。"
-        )
-
-    categories = ["写作润色", "投稿审稿", "文献数据", "展示转化"]
-    selected_category = st.segmented_control("工具类别", categories, default=categories[0])
-    filtered_tools = [tool for tool in NATURE_TOOL_CONFIGS if tool.get("category") == selected_category]
-    tool_names = [tool["name"] for tool in filtered_tools]
-    selected_name = st.selectbox("选择功能", tool_names)
-    selected_tool = next(tool for tool in filtered_tools if tool["name"] == selected_name)
-    st.caption(selected_tool["help"])
-
-    user_text = st.text_area(
-        "粘贴论文文本、实验结果、审稿意见或你的需求",
-        height=260,
-        placeholder="例如：粘贴摘要/引言段落、结果要点、reviewer comments、数据类型说明、研究问题等。",
+    render_nature_workspace(
+        NATURE_TOOL_CONFIGS,
+        llm_api_key,
+        llm_provider,
+        llm_base_url,
+        llm_model,
+        call_llm,
+        validate_llm_config,
+        compact_text,
+        render_tool_result,
     )
-    extra_requirements = st.text_area(
-        "补充要求（可选）",
-        height=110,
-        placeholder="例如：目标期刊、字数、中文/英文、领域背景、希望强调的创新点、需要避免的表述等。",
-    )
-
-    if st.button("运行 Nature 工具", type="primary", use_container_width=True):
-        if not validate_llm_config(llm_api_key, llm_base_url, llm_model):
-            return
-        if not user_text.strip():
-            st.warning("请先粘贴需要处理的文本或需求。")
-            return
-
-        prompt = f"""
-你正在执行一个科研写作/文献处理工具：{selected_tool["name"]}。
-
-任务说明：
-{selected_tool["instruction"].strip()}
-
-用户补充要求：
-{extra_requirements.strip() or "无"}
-
-输入材料：
-{compact_text(user_text, 16000)}
-
-请使用中文输出；如果用户明确要求英文正文，则正文部分用英文，解释部分仍可用中文。
-请保持专业、克制，不要编造不存在的数据、DOI、实验结果或期刊信息。
-""".strip()
-
-        try:
-            with st.spinner(f"正在运行：{selected_tool['name']}..."):
-                result = call_llm(
-                    llm_api_key=llm_api_key.strip(),
-                    llm_provider=llm_provider,
-                    llm_base_url=llm_base_url.strip(),
-                    llm_model=llm_model.strip(),
-                    system_prompt=selected_tool["system"],
-                    user_prompt=prompt,
-                    timeout=180,
-                )
-        except Exception as exc:
-            st.error(f"工具运行失败：{exc}")
-            return
-
-        render_tool_result("生成结果", result, f"{selected_tool['name']}.md")
 
 
 def render_app() -> None:
     st.set_page_config(page_title="生物医学文献分析工作台", layout="wide")
     apply_page_style()
     st.title("生物医学文献分析工作台")
-    st.caption("PDF精读 · 文献检索 · 引用追踪 · 学术写作 · PPT汇报")
+    st.caption("PDF精读 · 文献检索 · 引用追踪 · 科研写作 · 科研绘图 · PPT汇报")
     render_quick_start_guide()
 
     with st.sidebar:
@@ -3060,7 +3005,7 @@ def render_app() -> None:
                     st.error(f"连接失败：{exc}")
 
     pdf_tab, literature_tab, citation_tab, nature_tab, ppt_tab = st.tabs(
-        ["PDF精读", "文献检索", "引用追踪", "写作工具", "PPT汇报"]
+        ["PDF精读", "文献检索", "引用追踪", "科研写作", "PPT汇报"]
     )
     with pdf_tab:
         render_pdf_deep_reading_tab(llm_api_key, llm_provider, llm_base_url, llm_model)

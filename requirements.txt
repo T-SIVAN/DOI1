@@ -8,3 +8,5 @@ pillow
 python-pptx
 pymupdf4llm
 python-docx
+matplotlib
+seaborn

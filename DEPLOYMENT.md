@@ -9,6 +9,7 @@
 - `app.py`
 - `literature_search.py`
 - `ppt_report.py`
+- `nature_workspace.py`
 - `requirements.txt`
 - `README.md`
 - `.streamlit/config.toml`
@@ -72,7 +73,8 @@ LITERATURE_CONTACT_EMAIL = "your@email.com"
 
 ## 部署后检查
 
-- 打开网页，确认能看到 `PDF精读`、`文献检索`、`引用追踪`、`写作工具`、`PPT汇报` 五个标签。
+- 打开网页，确认能看到 `PDF精读`、`文献检索`、`引用追踪`、`科研写作`、`PPT汇报` 五个标签。
+- 进入 `科研写作 → 科研绘图`，上传 CSV/XLSX 后确认能预览并下载 PNG、SVG、PDF。
 - 不配置 OpenAlex Key 时，确认文献检索仍可选择 PubMed、Europe PMC 和 Crossref，且 OpenAlex 显示为禁用。
 - 使用 `CRISPR base editing`、2022–2026、每源 5 条做一次检索；有 OpenAlex Key 时运行四源，否则运行三源。
 - 不填 LLM Key 时应提示填写 Key。
