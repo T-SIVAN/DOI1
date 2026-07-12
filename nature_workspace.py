@@ -3,8 +3,6 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -74,6 +72,14 @@ def build_scientific_figure(
     height: float = 4.8,
     dpi: int = 300,
 ) -> Tuple[bytes, bytes, bytes]:
+    try:
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            "科研绘图依赖未安装完成。请在 requirements.txt 中保留 matplotlib 并重新部署。"
+        ) from exc
+
     if data.empty:
         raise ValueError("数据表为空。")
     if x_column not in data.columns:
