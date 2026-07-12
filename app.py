@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
 import os
 import re
 import time
@@ -9,16 +10,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from io import BytesIO
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
+from literature_search import (
+    FederatedSearchResult,
+    PaperRecord,
+    export_bibtex,
+    export_excel,
+    export_ris,
+    search_literature,
+)
 from ppt_report import build_pptx_bytes
 
 
 OPENALEX_WORKS = "https://api.openalex.org/works"
-DEFAULT_OPENALEX_EMAIL = "user@example.com"
+DEFAULT_OPENALEX_EMAIL = ""
 DEFAULT_OPENALEX_API_KEY = ""
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
@@ -285,18 +296,36 @@ def compact_text(text: Any, max_chars: int = 7000) -> str:
     return cleaned[: max_chars - 20].rstrip() + " ... [truncated]"
 
 
+def config_value(name: str, default: str = "") -> str:
+    """Read deploy-time configuration without requiring a local secrets file."""
+    environment_value = os.getenv(name)
+    if environment_value is not None:
+        return environment_value
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value) if value is not None else default
+
+
 def load_config_defaults(llm_provider: str) -> Dict[str, Any]:
+    contact_email = (
+        config_value("LITERATURE_CONTACT_EMAIL")
+        or config_value("NCBI_EMAIL")
+        or config_value("OPENALEX_MAILTO", DEFAULT_OPENALEX_EMAIL)
+    )
     return {
-        "llm_base_url": os.getenv(
+        "llm_base_url": config_value(
             "OPENAI_BASE_URL" if llm_provider != "Google Gemini" else "GEMINI_BASE_URL",
             DEFAULT_GEMINI_BASE_URL if llm_provider == "Google Gemini" else DEFAULT_LLM_BASE_URL,
         ),
-        "llm_model": os.getenv(
+        "llm_model": config_value(
             "OPENAI_MODEL" if llm_provider != "Google Gemini" else "GEMINI_MODEL",
             DEFAULT_GEMINI_MODEL if llm_provider == "Google Gemini" else DEFAULT_LLM_MODEL,
         ),
-        "openalex_api_key": os.getenv("OPENALEX_API_KEY", DEFAULT_OPENALEX_API_KEY),
-        "openalex_email": os.getenv("OPENALEX_MAILTO", DEFAULT_OPENALEX_EMAIL),
+        "openalex_api_key": config_value("OPENALEX_API_KEY", DEFAULT_OPENALEX_API_KEY),
+        "openalex_email": contact_email,
+        "ncbi_api_key": config_value("NCBI_API_KEY"),
     }
 
 
@@ -1341,6 +1370,52 @@ def call_llm(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         timeout=timeout,
+    )
+
+
+@st.cache_data(ttl=21600, max_entries=256, show_spinner=False)
+def cached_literature_search(
+    query: str,
+    selected_sources: tuple[str, ...],
+    start_year: int,
+    end_year: int,
+    limit: int,
+    smart_rewrite: bool,
+    llm_provider: str,
+    llm_base_url: str,
+    llm_model: str,
+    cache_scope: str,
+    _credentials: Dict[str, str],
+    _llm_api_key: str,
+) -> FederatedSearchResult:
+    """Cache one federated search without hashing or storing credentials in its key."""
+    del cache_scope
+    llm_callback = None
+    if smart_rewrite and _llm_api_key.strip():
+        def llm_callback(prompt: str) -> str:
+            return call_llm(
+                llm_api_key=_llm_api_key.strip(),
+                llm_provider=llm_provider,
+                llm_base_url=llm_base_url.strip(),
+                llm_model=llm_model.strip(),
+                system_prompt=(
+                    "你是生物医学信息检索专家。只返回一个 JSON 对象，键必须严格为 "
+                    "pubmed、europe_pmc、openalex、crossref、terms_en、terms_zh；"
+                    "不得生成论文、DOI、PMID 或用户未提供的日期限制。"
+                ),
+                user_prompt=prompt,
+                timeout=90,
+            )
+
+    return search_literature(
+        query=query,
+        selected_sources=selected_sources,
+        start_year=start_year,
+        end_year=end_year,
+        limit=limit,
+        credentials=_credentials,
+        smart_rewrite=smart_rewrite,
+        llm_callback=llm_callback,
     )
 
 
@@ -2448,6 +2523,365 @@ def render_ppt_report_tab(llm_api_key: str, llm_provider: str, llm_base_url: str
             st.write(f"{idx}. {analysis.get('document_title')}")
 
 
+LITERATURE_SOURCE_LABELS = {
+    "pubmed": "PubMed",
+    "europepmc": "Europe PMC",
+    "openalex": "OpenAlex",
+    "crossref": "Crossref",
+}
+
+
+def literature_record_key(record: PaperRecord) -> str:
+    for prefix, value in (
+        ("doi", record.doi),
+        ("pmid", record.pmid),
+        ("pmcid", record.pmcid),
+        ("openalex", record.openalex_id),
+    ):
+        if value:
+            return f"{prefix}:{value.strip().lower()}"
+    fallback = "\0".join((record.title, str(record.year or ""), record.authors[0] if record.authors else ""))
+    return f"title:{hashlib.sha256(fallback.encode('utf-8')).hexdigest()}"
+
+
+def literature_quality_label(record: PaperRecord) -> str:
+    if record.is_retracted:
+        return "已撤稿"
+    if record.summary_ready and record.reference_ready:
+        return "摘要/引用完整"
+    if record.summary_ready:
+        return "可总结"
+    if record.reference_ready:
+        return "可引用"
+    return "需补全"
+
+
+def render_literature_search_tab(
+    llm_api_key: str,
+    llm_provider: str,
+    llm_base_url: str,
+    llm_model: str,
+    openalex_api_key: str,
+    email: str,
+) -> None:
+    st.subheader("文献检索")
+    st.caption("并行检索 PubMed、Europe PMC、OpenAlex 和 Crossref，统一去重后导出引用记录。")
+
+    has_openalex_key = bool(openalex_api_key.strip())
+    current_year = datetime.now().year
+    with st.form("literature_search_form"):
+        query = st.text_area(
+            "研究问题或关键词",
+            placeholder="例如：CRISPR base editing 在遗传病治疗中的进展",
+            height=100,
+        )
+        st.markdown("**检索来源**")
+        source_columns = st.columns(4)
+        use_pubmed = source_columns[0].checkbox("PubMed", value=True)
+        use_europepmc = source_columns[1].checkbox("Europe PMC", value=True)
+        use_openalex = source_columns[2].checkbox(
+            "OpenAlex",
+            value=has_openalex_key,
+            disabled=not has_openalex_key,
+        )
+        use_crossref = source_columns[3].checkbox("Crossref", value=True)
+        if not has_openalex_key:
+            st.caption("OpenAlex 需要 API Key；请在左侧高级设置或部署 Secrets 中配置后启用。")
+
+        setting_columns = st.columns(3)
+        start_year = int(setting_columns[0].number_input(
+            "起始年份", min_value=1800, max_value=current_year + 1,
+            value=max(1800, current_year - 5), step=1,
+        ))
+        end_year = int(setting_columns[1].number_input(
+            "结束年份", min_value=1800, max_value=current_year + 1,
+            value=current_year, step=1,
+        ))
+        per_source_limit = int(setting_columns[2].number_input(
+            "每个来源返回数", min_value=1, max_value=50, value=20, step=1,
+        ))
+        smart_rewrite = st.checkbox(
+            "使用 LLM 智能改写分库检索式",
+            value=bool(llm_api_key.strip()),
+            disabled=not bool(llm_api_key.strip()),
+            help="仅调用一次 LLM；失败时自动使用原始关键词。",
+        )
+        submitted = st.form_submit_button("开始检索", type="primary", use_container_width=True)
+
+    if submitted:
+        selected_sources = tuple(
+            source for source, enabled in (
+                ("pubmed", use_pubmed),
+                ("europepmc", use_europepmc),
+                ("openalex", use_openalex and has_openalex_key),
+                ("crossref", use_crossref),
+            ) if enabled
+        )
+        if not query.strip():
+            st.warning("请输入研究问题或关键词。")
+        elif not selected_sources:
+            st.warning("请至少选择一个检索来源。")
+        elif start_year > end_year:
+            st.warning("起始年份不能晚于结束年份。")
+        elif any(source in selected_sources for source in ("pubmed", "crossref")) and not email.strip():
+            st.warning("请在左侧高级设置填写联系邮箱，以符合 NCBI/Crossref 的 API 使用规范。")
+        else:
+            credentials = {
+                "openalex_api_key": openalex_api_key.strip(),
+                "ncbi_api_key": config_value("NCBI_API_KEY").strip(),
+                "email": email.strip(),
+                "ncbi_tool": "biomedical-literature-workbench",
+            }
+            credential_marker = hashlib.sha256(
+                "\0".join((llm_api_key, openalex_api_key, credentials["ncbi_api_key"])).encode("utf-8")
+            ).hexdigest()
+            if st.session_state.get("literature_credential_marker") != credential_marker:
+                st.session_state["literature_cache_scope"] = os.urandom(16).hex()
+                st.session_state["literature_credential_marker"] = credential_marker
+            cache_scope = st.session_state.setdefault("literature_cache_scope", os.urandom(16).hex())
+            try:
+                with st.spinner("正在并行检索并合并结果..."):
+                    result = cached_literature_search(
+                        query=query.strip(),
+                        selected_sources=selected_sources,
+                        start_year=start_year,
+                        end_year=end_year,
+                        limit=per_source_limit,
+                        smart_rewrite=smart_rewrite,
+                        llm_provider=llm_provider,
+                        llm_base_url=llm_base_url,
+                        llm_model=llm_model,
+                        cache_scope=cache_scope,
+                        _credentials=credentials,
+                        _llm_api_key=llm_api_key,
+                    )
+                st.session_state["literature_search_result"] = result
+                st.session_state["literature_selected_keys"] = set()
+                for widget_key in (
+                    "literature_filter_sources", "literature_filter_years",
+                    "literature_filter_oa", "literature_filter_summary",
+                    "literature_sort",
+                ):
+                    st.session_state.pop(widget_key, None)
+            except Exception as exc:
+                st.error(f"检索失败：{exc}")
+
+    result = st.session_state.get("literature_search_result")
+    if not isinstance(result, FederatedSearchResult):
+        st.info("填写研究问题并开始检索。无 LLM Key 时会直接使用原始关键词。")
+        return
+
+    records = list(result.records)
+    summary_count = sum(record.summary_ready for record in records)
+    oa_count = sum(bool(record.is_open_access and record.oa_url) for record in records)
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("原始记录", result.raw_count)
+    metric_columns[1].metric("唯一文献", result.unique_count)
+    metric_columns[2].metric("去除重复", result.duplicate_count)
+    metric_columns[3].metric("可总结", summary_count)
+    metric_columns[4].metric("开放获取", oa_count)
+    metric_columns[5].metric("耗时", f"{result.elapsed_seconds:.1f}s")
+
+    source_metric_columns = st.columns(4)
+    for column, source in zip(source_metric_columns, LITERATURE_SOURCE_LABELS):
+        column.metric(LITERATURE_SOURCE_LABELS[source], result.source_counts.get(source, 0))
+
+    with st.expander("分库检索式与来源状态", expanded=bool(result.errors)):
+        for source, source_query in result.source_queries.items():
+            st.markdown(f"**{LITERATURE_SOURCE_LABELS.get(source, source)}**")
+            st.code(source_query, language=None)
+        if result.terms_en or result.terms_zh:
+            st.caption(
+                f"英文扩展词：{'; '.join(result.terms_en) or '无'} | "
+                f"中文扩展词：{'; '.join(result.terms_zh) or '无'}"
+            )
+        if result.errors:
+            st.markdown("**来源错误（其他来源结果仍保留）**")
+            for source, error in result.errors.items():
+                st.warning(f"{LITERATURE_SOURCE_LABELS.get(source, source)}：{error}")
+        else:
+            st.success("已完成全部所选来源。")
+
+    if not records:
+        st.warning("当前检索没有返回文献，请调整关键词、年份或来源后重试。")
+        return
+
+    st.markdown("### 筛选与排序")
+    source_options = [
+        source for source in LITERATURE_SOURCE_LABELS
+        if any(source in (record.sources or [record.source]) for record in records)
+    ]
+    filter_columns = st.columns(4)
+    source_filter = filter_columns[0].multiselect(
+        "来源", source_options, default=source_options,
+        format_func=lambda value: LITERATURE_SOURCE_LABELS.get(value, value),
+        key="literature_filter_sources",
+    )
+    known_years = [record.year for record in records if record.year is not None]
+    if known_years and min(known_years) < max(known_years):
+        year_bounds = (min(known_years), max(known_years))
+        selected_year_range = filter_columns[1].slider(
+            "年份", min_value=year_bounds[0], max_value=year_bounds[1],
+            value=year_bounds, key="literature_filter_years",
+        )
+    else:
+        only_year = known_years[0] if known_years else None
+        filter_columns[1].text_input("年份", value=str(only_year or "未知"), disabled=True)
+        year_bounds = (only_year, only_year)
+        selected_year_range = year_bounds
+    oa_filter = filter_columns[2].selectbox(
+        "开放获取", ["全部", "仅开放获取", "排除开放获取"],
+        key="literature_filter_oa",
+    )
+    summary_filter = filter_columns[3].selectbox(
+        "摘要状态", ["全部", "可总结", "摘要不足"],
+        key="literature_filter_summary",
+    )
+    sort_mode = st.segmented_control(
+        "排序", ["综合相关性", "年份（新到旧）", "引用数（高到低）"],
+        default="综合相关性", key="literature_sort",
+    )
+
+    selected_source_set = set(source_filter)
+    filtered_records = [
+        record for record in records
+        if selected_source_set.intersection(record.sources or [record.source])
+    ]
+    if known_years and selected_year_range[0] is not None:
+        full_year_range = selected_year_range == year_bounds
+        filtered_records = [
+            record for record in filtered_records
+            if (record.year is None and full_year_range)
+            or (record.year is not None and selected_year_range[0] <= record.year <= selected_year_range[1])
+        ]
+    if oa_filter == "仅开放获取":
+        filtered_records = [record for record in filtered_records if record.is_open_access and record.oa_url]
+    elif oa_filter == "排除开放获取":
+        filtered_records = [record for record in filtered_records if not (record.is_open_access and record.oa_url)]
+    if summary_filter == "可总结":
+        filtered_records = [record for record in filtered_records if record.summary_ready]
+    elif summary_filter == "摘要不足":
+        filtered_records = [record for record in filtered_records if not record.summary_ready]
+    if sort_mode == "年份（新到旧）":
+        filtered_records.sort(key=lambda record: (record.year or 0, record.score), reverse=True)
+    elif sort_mode == "引用数（高到低）":
+        filtered_records.sort(key=lambda record: (record.citations or -1, record.score), reverse=True)
+    else:
+        filtered_records.sort(key=lambda record: record.rank or 999999)
+
+    selected_keys = set(st.session_state.get("literature_selected_keys", set()))
+    table_rows = []
+    for record in filtered_records:
+        record_key = literature_record_key(record)
+        authors = "; ".join(record.authors[:3])
+        if len(record.authors) > 3:
+            authors += " 等"
+        identifiers = record.doi or (f"PMID:{record.pmid}" if record.pmid else "")
+        table_rows.append({
+            "选择": record_key in selected_keys,
+            "题名": f"[撤稿] {record.title}" if record.is_retracted else record.title,
+            "作者": authors,
+            "年份": record.year,
+            "期刊": record.publication,
+            "DOI / PMID": identifiers,
+            "来源": "; ".join(LITERATURE_SOURCE_LABELS.get(source, source) for source in record.sources),
+            "引用数": record.citations,
+            "质量": literature_quality_label(record),
+            "链接": record.oa_url or record.url,
+            "_record_key": record_key,
+        })
+
+    st.markdown("### 文献列表")
+    st.caption(f"当前筛选 {len(filtered_records)} 篇；勾选后优先导出勾选项，未勾选则导出当前筛选结果。")
+    if table_rows:
+        table_frame = pd.DataFrame(table_rows)
+        editor_signature = hashlib.sha256(json.dumps({
+            "sources": source_filter,
+            "years": selected_year_range,
+            "oa": oa_filter,
+            "summary": summary_filter,
+            "sort": sort_mode,
+        }, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        edited_frame = st.data_editor(
+            table_frame,
+            key=f"literature_result_editor_{editor_signature}",
+            use_container_width=True,
+            hide_index=True,
+            height=min(720, 38 + 36 * len(table_frame)),
+            column_order=[
+                "选择", "题名", "作者", "年份", "期刊", "DOI / PMID",
+                "来源", "引用数", "质量", "链接",
+            ],
+            column_config={
+                "选择": st.column_config.CheckboxColumn("选择", width="small"),
+                "题名": st.column_config.TextColumn("题名", width="large"),
+                "作者": st.column_config.TextColumn("作者", width="medium"),
+                "年份": st.column_config.NumberColumn("年份", format="%d", width="small"),
+                "引用数": st.column_config.NumberColumn("引用数", format="%d", width="small"),
+                "链接": st.column_config.LinkColumn("链接", display_text="打开", width="small"),
+            },
+            disabled=[
+                "题名", "作者", "年份", "期刊", "DOI / PMID", "来源",
+                "引用数", "质量", "链接", "_record_key",
+            ],
+        )
+        visible_keys = set(table_frame["_record_key"].tolist())
+        selected_keys.difference_update(visible_keys)
+        selected_keys.update(
+            str(row["_record_key"])
+            for row in edited_frame.to_dict("records")
+            if row.get("选择")
+        )
+        st.session_state["literature_selected_keys"] = selected_keys
+    else:
+        st.info("没有符合当前筛选条件的文献。")
+
+    selected_records = [
+        record for record in records if literature_record_key(record) in selected_keys
+    ]
+    export_records = selected_records or filtered_records
+    export_label = f"勾选的 {len(selected_records)} 篇" if selected_records else f"筛选后的 {len(filtered_records)} 篇"
+    st.markdown("### 导出")
+    st.caption(f"将导出{export_label}。Excel 始终包含 Papers、Source_Summary、Search_Queries 三个工作表。")
+    if export_records:
+        export_result = replace(result, records=export_records, unique_count=len(export_records))
+        date_suffix = datetime.now().strftime("%Y%m%d")
+        download_columns = st.columns(3)
+        download_columns[0].download_button(
+            "下载 Excel",
+            data=export_excel(export_result),
+            file_name=f"literature_search_{date_suffix}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        download_columns[1].download_button(
+            "下载 RIS",
+            data=export_ris(export_records),
+            file_name=f"literature_search_{date_suffix}.ris",
+            mime="application/x-research-info-systems",
+            use_container_width=True,
+        )
+        download_columns[2].download_button(
+            "下载 BibTeX",
+            data=export_bibtex(export_records),
+            file_name=f"literature_search_{date_suffix}.bib",
+            mime="application/x-bibtex",
+            use_container_width=True,
+        )
+
+    fetched_dates = [record.fetched_at[:10] for record in records if record.fetched_at]
+    fetched_date = max(fetched_dates, default=datetime.now(timezone.utc).date().isoformat())
+    st.markdown(
+        "<small>数据来源："
+        '<a href="https://pubmed.ncbi.nlm.nih.gov/">PubMed/NCBI</a> · '
+        '<a href="https://europepmc.org/">Europe PMC</a> · '
+        '<a href="https://openalex.org/">OpenAlex</a> · '
+        '<a href="https://www.crossref.org/">Crossref</a>'
+        f"；抓取日期：{fetched_date}。仅提供来源页和上游确认的开放获取链接。</small>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: int) -> None:
     st.subheader("引用追踪")
     st.caption("输入 DOI 或 OpenAlex Paper ID，抓取引用该文献的论文并导出 Excel。")
@@ -2587,7 +3021,7 @@ def render_app() -> None:
     st.set_page_config(page_title="生物医学文献分析工作台", layout="wide")
     apply_page_style()
     st.title("生物医学文献分析工作台")
-    st.caption("PDF精读 · 引用追踪 · 学术写作 · PPT汇报")
+    st.caption("PDF精读 · 文献检索 · 引用追踪 · 学术写作 · PPT汇报")
     render_quick_start_guide()
 
     with st.sidebar:
@@ -2625,9 +3059,20 @@ def render_app() -> None:
                 except Exception as exc:
                     st.error(f"连接失败：{exc}")
 
-    pdf_tab, citation_tab, nature_tab, ppt_tab = st.tabs(["PDF精读", "引用追踪", "写作工具", "PPT汇报"])
+    pdf_tab, literature_tab, citation_tab, nature_tab, ppt_tab = st.tabs(
+        ["PDF精读", "文献检索", "引用追踪", "写作工具", "PPT汇报"]
+    )
     with pdf_tab:
         render_pdf_deep_reading_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
+    with literature_tab:
+        render_literature_search_tab(
+            llm_api_key,
+            llm_provider,
+            llm_base_url,
+            llm_model,
+            openalex_api_key,
+            email,
+        )
     with citation_tab:
         render_citation_tracking_tab(openalex_api_key, email, int(max_papers))
     with nature_tab:
