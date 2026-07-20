@@ -7,26 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-
-NATURE_SKILL_COVERAGE = [
-    ("nature-academic-search", "完整", "文献检索", "四源实时检索、去重、筛选与引用格式导出"),
-    ("nature-citation", "部分", "引用与数据", "可规划引用支撑；尚未实现严格期刊集合的逐句自动配引"),
-    ("nature-data", "部分", "引用与数据", "可生成声明与 FAIR 清单；尚未连接数据仓储提交接口"),
-    ("nature-downloader", "未实现", "边界外", "按产品边界不批量下载或代理论文全文"),
-    ("nature-experiment-log", "未实现", "待扩展", "尚无实验日志结构化记录与持久化"),
-    ("nature-figure", "部分", "科研绘图", "已支持 Python 五类图与投稿格式导出；尚无 R、多面板编排和统计检验"),
-    ("nature-literature-pipeline", "部分", "文献检索", "已覆盖检索与导出；尚无跨会话流水线和后台任务"),
-    ("nature-paper-to-patent", "部分", "成果转化", "提供证据映射初筛；尚未生成完整分件 DOCX 专利包"),
-    ("nature-paper2ppt", "完整", "PPT汇报", "支持论文 PDF 分析、图表提取和 PPTX 生成"),
-    ("nature-polishing", "部分", "写作与润色", "支持学术润色与翻译；尚无 LaTeX 版式审校"),
-    ("nature-proposal-writer", "未实现", "待扩展", "尚无基金申请书专用工作流"),
-    ("nature-reader", "部分", "PDF精读", "支持 PDF 解析与精读报告；尚非逐块锚定的全文双语阅读器"),
-    ("nature-ref-verifier", "部分", "文献检索", "可用 DOI/PMID 元数据核验；尚无逐条声明-引文一致性审计"),
-    ("nature-response", "部分", "审稿与回复", "支持逐点回复草稿；尚无修订稿行号和附件联动"),
-    ("nature-reviewer", "部分", "审稿与回复", "支持三审稿人模拟；仍是单次 LLM 分析而非完整证据审计"),
-    ("nature-statistics", "未实现", "待扩展", "尚无统计方法选择、效应量和功效分析工作流"),
-    ("nature-writing", "部分", "写作与润色", "支持章节起草与论证链；尚无整稿状态机和跨章节一致性检查"),
-]
+from attachment_utils import SUPPORTED_ATTACHMENT_TYPES, build_attachment_context
 
 
 def read_table(uploaded_file: Any) -> pd.DataFrame:
@@ -206,12 +187,22 @@ def _render_text_tools(
     selected_tool = next(tool for tool in tools if tool["name"] == selected_name)
     user_text = st.text_area("输入材料", height=220, key=f"{key_prefix}_input",
                              placeholder="粘贴论文段落、结果要点、审稿意见或研究需求。")
+    attachments = st.file_uploader(
+        "上传附件（可选）",
+        type=SUPPORTED_ATTACHMENT_TYPES,
+        accept_multiple_files=True,
+        key=f"{key_prefix}_attachments",
+        help="支持 PDF、Word、PPT、表格、Markdown、RIS 和 BibTeX；附件会与文本一起交给当前任务。",
+    )
     with st.expander("输出偏好（可选）", expanded=False):
         extra = st.text_area("目标期刊、语言、篇幅和其他要求", height=90, key=f"{key_prefix}_extra")
     if st.button(f"开始：{selected_name}", type="primary", use_container_width=True, key=f"{key_prefix}_run"):
-        if not validate_llm_config(llm_api_key, llm_base_url, llm_model) or not user_text.strip():
-            if not user_text.strip():
-                st.warning("请先输入需要处理的材料。")
+        attachment_context, attachment_warnings = build_attachment_context(attachments)
+        for warning in attachment_warnings:
+            st.warning(warning)
+        if not validate_llm_config(llm_api_key, llm_base_url, llm_model) or not (user_text.strip() or attachment_context):
+            if not (user_text.strip() or attachment_context):
+                st.warning("请先输入材料或上传至少一个可读取的附件。")
             return
         prompt = f"""你正在执行科研工作流：{selected_tool['name']}。
 
@@ -221,7 +212,10 @@ def _render_text_tools(
 输出偏好：{extra.strip() or '无'}
 
 输入材料：
-{compact_text(user_text, 16000)}
+{compact_text(user_text, 12000) or '无粘贴文本'}
+
+附件材料：
+{attachment_context or '无附件'}
 
 请使用中文说明；用户明确要求英文正文时，正文使用英文。不得编造数据、DOI、实验结果或期刊信息。"""
         try:
@@ -305,42 +299,39 @@ def render_nature_workspace(
     compact_text: Callable[[Any, int], str],
     render_tool_result: Callable[[str, str, str], None],
 ) -> None:
-    st.subheader("科研写作工作台")
-    st.caption("按研究任务拆分工具，先选工作流，再提供材料；绘图功能可独立于 LLM 运行。")
-    writing, review, evidence, figure, transform, coverage = st.tabs(
-        ["写作与润色", "审稿与回复", "引用与数据", "科研绘图", "成果转化", "能力覆盖"]
-    )
+    st.subheader("科研任务")
+    st.caption("选择任务类型，输入文字或直接上传材料；科研绘图可独立于 LLM 运行。")
     category_map = {
         "writing": ["写作润色"],
         "review": ["投稿审稿"],
         "evidence": ["文献数据"],
+        "design": ["研究设计"],
         "transform": ["展示转化"],
     }
-    with writing:
+    category = st.selectbox(
+        "任务类型",
+        ["写作与润色", "审稿与回复", "引用与数据", "研究设计", "科研绘图", "成果转化"],
+        key="nature_category",
+    )
+    if category == "写作与润色":
         _render_text_tools([t for t in tool_configs if t.get("category") in category_map["writing"]],
                            llm_api_key, llm_provider, llm_base_url, llm_model, call_llm,
                            validate_llm_config, compact_text, render_tool_result, "nature_writing")
-    with review:
+    elif category == "审稿与回复":
         _render_text_tools([t for t in tool_configs if t.get("category") in category_map["review"]],
                            llm_api_key, llm_provider, llm_base_url, llm_model, call_llm,
                            validate_llm_config, compact_text, render_tool_result, "nature_review")
-    with evidence:
+    elif category == "引用与数据":
         _render_text_tools([t for t in tool_configs if t.get("category") in category_map["evidence"]],
                            llm_api_key, llm_provider, llm_base_url, llm_model, call_llm,
                            validate_llm_config, compact_text, render_tool_result, "nature_evidence")
-    with figure:
+    elif category == "研究设计":
+        _render_text_tools([t for t in tool_configs if t.get("category") in category_map["design"]],
+                           llm_api_key, llm_provider, llm_base_url, llm_model, call_llm,
+                           validate_llm_config, compact_text, render_tool_result, "nature_design")
+    elif category == "科研绘图":
         render_figure_workspace()
-    with transform:
+    else:
         tools = [t for t in tool_configs if t.get("category") in category_map["transform"] and t.get("name") != "科研绘图规划"]
         _render_text_tools(tools, llm_api_key, llm_provider, llm_base_url, llm_model, call_llm,
                            validate_llm_config, compact_text, render_tool_result, "nature_transform")
-    with coverage:
-        st.markdown("#### 上游 nature-skills 能力核对")
-        st.caption("“部分”表示当前网页提供相关入口，但尚未实现上游 skill 的完整工作流、质量门槛或交付格式。")
-        coverage_df = pd.DataFrame(NATURE_SKILL_COVERAGE, columns=["上游 Skill", "状态", "网页位置", "核对说明"])
-        st.dataframe(coverage_df, use_container_width=True, hide_index=True)
-        counts = coverage_df["状态"].value_counts()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("完整", int(counts.get("完整", 0)))
-        c2.metric("部分", int(counts.get("部分", 0)))
-        c3.metric("未实现", int(counts.get("未实现", 0)))

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
+from attachment_utils import SUPPORTED_ATTACHMENT_TYPES, build_attachment_context
 from literature_search import (
     FederatedSearchResult,
     PaperRecord,
@@ -87,7 +88,6 @@ OUTPUT_COLUMNS = [
 
 BREAKTHROUGH_COLUMNS = ["年份", "里程碑/技术突破", "代表文献", "DOI", "关键意义"]
 
-NATURE_SKILLS_SOURCE_URL = "https://github.com/Yuan1z0825/nature-skills"
 NATURE_TOOL_CONFIGS = [
     {
         "category": "写作润色",
@@ -233,6 +233,61 @@ NATURE_TOOL_CONFIGS = [
 3. 【其他数据库检索式】：CrossRef、Google Scholar、Scopus 或 arXiv。
 4. 【纳入排除标准】。
 5. 【建议导出字段】：题名、摘要、DOI、PMID、年份、期刊等。
+""",
+    },
+    {
+        "category": "写作润色",
+        "name": "基金申请书策划",
+        "help": "把研究基础和初步结果组织为立项依据、科学问题、研究目标与技术路线。",
+        "system": "你是熟悉生物医学基金申请评审标准的科研项目顾问。",
+        "instruction": """
+请根据附件和输入信息规划基金申请书。输出：
+1. 【核心科学问题与假设】。
+2. 【立项依据框架】：现状、缺口、前期基础和必要性。
+3. 【研究目标与工作包】：目标、方法、里程碑和交付物。
+4. 【技术路线与风险预案】。
+5. 【仍需作者补充的证据】：不得代填未知数据。
+""",
+    },
+    {
+        "category": "文献数据",
+        "name": "参考文献一致性核验",
+        "help": "核对正文陈述与参考文献是否匹配，并标出 DOI、年份、题名等待查项。",
+        "system": "你是严谨的科研参考文献审校员，只依据用户提供的正文与参考文献判断。",
+        "instruction": """
+请逐条核验正文陈述与所附参考文献。输出：
+1. 【核验表】：陈述、对应文献、支持程度、问题和建议动作。
+2. 【元数据异常】：题名、作者、年份、期刊、DOI 的矛盾或缺失。
+3. 【过度外推】：文献结论不足以支持正文的地方。
+4. 【待联网复核项】：无法从附件确认时明确标记，禁止编造。
+""",
+    },
+    {
+        "category": "研究设计",
+        "name": "统计方案与功效分析",
+        "help": "根据研究设计和数据结构选择统计方法，规划效应量、功效与敏感性分析。",
+        "system": "你是生物统计师，重视研究设计、假设前提、效应量和可重复分析。",
+        "instruction": """
+请生成可执行的统计分析方案。输出：
+1. 【变量与研究设计识别】。
+2. 【主要/次要终点与统计模型】。
+3. 【模型前提、缺失值、多重比较和敏感性分析】。
+4. 【效应量与样本量/功效分析所需参数】；缺少参数时给公式和情景，不虚构数值。
+5. 【推荐结果表、图和报告句式】。
+""",
+    },
+    {
+        "category": "研究设计",
+        "name": "实验日志结构化",
+        "help": "把实验记录、仪器导出或零散笔记整理为可追溯的实验日志和复现实验清单。",
+        "system": "你是重视可追溯性、版本和偏差记录的实验室数据管理员。",
+        "instruction": """
+请把输入材料整理为结构化实验日志。输出：
+1. 【实验目的、日期、人员与样本批次】。
+2. 【材料、仪器、软件和版本】。
+3. 【逐步方法与关键参数】。
+4. 【原始观察、偏差、失败与处理决定】。
+5. 【结果文件索引、质控检查和下一步】；未知字段保留“待补充”。
 """,
     },
 ]
@@ -395,17 +450,37 @@ def apply_page_style() -> None:
         """
         <style>
         :root {
-            --app-blue: #2563eb;
-            --app-blue-dark: #1d4ed8;
-            --app-border: #dbe4f0;
-            --app-muted: #64748b;
-            --app-surface: #f8fafc;
+            --app-blue: #0f766e;
+            --app-blue-dark: #115e59;
+            --app-border: #dce5e4;
+            --app-muted: #667085;
+            --app-surface: #f7faf9;
         }
         .block-container {
-            max-width: 1240px;
-            padding-top: 1.5rem;
+            max-width: 1080px;
+            padding-top: 2rem;
             padding-bottom: 3rem;
         }
+        .app-hero {
+            padding: 1.15rem 1.3rem;
+            margin-bottom: 1.25rem;
+            border: 1px solid var(--app-border);
+            border-radius: 16px;
+            background: linear-gradient(135deg, #f0fdfa 0%, #ffffff 68%);
+        }
+        .app-kicker {
+            color: var(--app-blue);
+            font-size: .78rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .app-hero h1 {
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
+            margin: .3rem 0 .35rem 0;
+            color: #0f172a !important;
+        }
+        .app-hero p { color: var(--app-muted) !important; margin: 0; }
         h1 {
             letter-spacing: 0;
             margin-bottom: 0.15rem;
@@ -429,18 +504,20 @@ def apply_page_style() -> None:
         }
         div[data-testid="stVerticalBlockBorderWrapper"] {
             border-color: var(--app-border);
-            background: linear-gradient(180deg, #ffffff 0%, var(--app-surface) 100%);
+            background: #ffffff;
+            border-radius: 12px;
         }
         div[data-testid="stAlert"] {
-            border-radius: 6px;
+            border-radius: 10px;
         }
         div[data-testid="stFileUploader"] section {
             border-color: var(--app-border);
-            background: #ffffff;
+            background: var(--app-surface);
+            border-radius: 10px;
         }
         .stDownloadButton button,
         .stButton button {
-            border-radius: 6px;
+            border-radius: 9px;
             font-weight: 600;
             border-color: #cbd5e1;
         }
@@ -458,8 +535,22 @@ def apply_page_style() -> None:
             padding-top: 1.25rem;
         }
         section[data-testid="stSidebar"] {
-            background: #f8fafc;
+            background: #f7faf9;
             border-right: 1px solid var(--app-border);
+        }
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] div[role="radiogroup"] label p,
+        section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] p {
+            color: #172033 !important;
+        }
+        section[data-testid="stSidebar"] div[role="radiogroup"] label {
+            padding: .35rem .45rem;
+            border-radius: 8px;
+        }
+        @media (max-width: 640px) {
+            .block-container { padding-top: 1rem; }
+            .app-hero { padding: 1rem; border-radius: 12px; }
         }
         </style>
         """,
@@ -2576,6 +2667,13 @@ def render_literature_search_tab(
             placeholder="例如：CRISPR base editing 在遗传病治疗中的进展",
             height=100,
         )
+        search_attachments = st.file_uploader(
+            "上传研究材料（可选）",
+            type=SUPPORTED_ATTACHMENT_TYPES,
+            accept_multiple_files=True,
+            key="literature_search_attachments",
+            help="上传论文、研究计划或笔记后，LLM 会结合材料生成分库检索式。",
+        )
         st.markdown("**检索来源**")
         source_columns = st.columns(4)
         use_pubmed = source_columns[0].checkbox("PubMed", value=True)
@@ -2610,6 +2708,15 @@ def render_literature_search_tab(
         submitted = st.form_submit_button("开始检索", type="primary", use_container_width=True)
 
     if submitted:
+        attachment_context, attachment_warnings = build_attachment_context(search_attachments, max_chars=8_000)
+        for warning in attachment_warnings:
+            st.warning(warning)
+        effective_query = query.strip()
+        if attachment_context and smart_rewrite:
+            effective_query = (
+                f"{effective_query or '请根据附件提炼研究问题并设计检索式。'}\n\n"
+                f"以下为用户上传的研究材料：\n{attachment_context}"
+            )
         selected_sources = tuple(
             source for source, enabled in (
                 ("pubmed", use_pubmed),
@@ -2618,8 +2725,10 @@ def render_literature_search_tab(
                 ("crossref", use_crossref),
             ) if enabled
         )
-        if not query.strip():
-            st.warning("请输入研究问题或关键词。")
+        if not effective_query:
+            st.warning("请输入研究问题或上传可读取的研究材料。")
+        elif attachment_context and not smart_rewrite and not query.strip():
+            st.warning("仅使用附件发起检索需要 LLM API Key；也可以手动填写关键词后直接检索。")
         elif not selected_sources:
             st.warning("请至少选择一个检索来源。")
         elif start_year > end_year:
@@ -2643,7 +2752,7 @@ def render_literature_search_tab(
             try:
                 with st.spinner("正在并行检索并合并结果..."):
                     result = cached_literature_search(
-                        query=query.strip(),
+                        query=effective_query,
                         selected_sources=selected_sources,
                         start_year=start_year,
                         end_year=end_year,
@@ -2885,14 +2994,30 @@ def render_literature_search_tab(
 
 def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: int) -> None:
     st.subheader("引用追踪")
-    st.caption("输入 DOI 或 OpenAlex Paper ID，抓取引用该文献的论文并导出 Excel。")
+    st.caption("输入 DOI / OpenAlex Paper ID，或上传含有标识符的材料，抓取引用文献并导出 Excel。")
     with st.expander("使用说明", expanded=False):
         st.markdown(
             "- 数据源为 OpenAlex，不需要 Semantic Scholar API Key。\n"
             "- 结果为客观元数据：标题、年份、DOI、摘要、引用数、期刊和作者。\n"
             "- 开放全文上下文模式只处理 OA PDF，不绕过付费墙；没有全文时会降级为元数据证据。"
         )
-    identifier = st.text_input("请输入目标文献 DOI 或 OpenAlex Paper ID", placeholder="例如：10.1038/s41586-020-2649-2 或 W3035965352")
+    citation_attachments = st.file_uploader(
+        "上传文献或标识符清单（可选）",
+        type=SUPPORTED_ATTACHMENT_TYPES,
+        accept_multiple_files=True,
+        key="citation_attachments",
+        help="系统会从附件文本中识别第一个 DOI 或 OpenAlex Paper ID。",
+    )
+    attachment_context, attachment_warnings = build_attachment_context(citation_attachments, max_chars=12_000)
+    attachment_doi = extract_doi_from_text(attachment_context)
+    openalex_match = re.search(r"(?i)\bW\d{6,}\b", attachment_context)
+    attachment_identifier = attachment_doi or (openalex_match.group(0) if openalex_match else "")
+    if attachment_identifier:
+        st.caption(f"已从附件识别：`{attachment_identifier}`（可在下方手动覆盖）")
+    identifier = st.text_input(
+        "目标文献 DOI 或 OpenAlex Paper ID",
+        placeholder="例如：10.1038/s41586-020-2649-2 或 W3035965352",
+    )
     citation_mode = st.segmented_control(
         "分析模式",
         [CITATION_METADATA_ONLY, CITATION_CONTEXT_MODE],
@@ -2903,8 +3028,11 @@ def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: 
     start = st.button("开始分析", type="primary", use_container_width=True)
 
     if start:
-        if not identifier.strip():
-            st.warning("请输入目标文献的 DOI 或 Paper ID。")
+        for warning in attachment_warnings:
+            st.warning(warning)
+        resolved_identifier = identifier.strip() or attachment_identifier
+        if not resolved_identifier:
+            st.warning("请输入目标文献的 DOI / Paper ID，或上传包含标识符的附件。")
             return
 
         progress = st.progress(0, text="准备开始...")
@@ -2914,7 +3042,7 @@ def render_citation_tracking_tab(openalex_api_key: str, email: str, max_papers: 
         try:
             with st.spinner("系统正在分析，请稍候..."):
                 df = run_analysis(
-                    identifier=identifier.strip(),
+                    identifier=resolved_identifier,
                     openalex_api_key=openalex_api_key.strip(),
                     email=email.strip(),
                     max_papers=int(max_papers),
@@ -2962,15 +3090,111 @@ def render_nature_toolbox_tab(llm_api_key: str, llm_provider: str, llm_base_url:
     )
 
 
+def render_research_chat(
+    llm_api_key: str,
+    llm_provider: str,
+    llm_base_url: str,
+    llm_model: str,
+) -> None:
+    st.subheader("科研对话")
+    st.caption("连续追问同一个研究问题；可在任意一轮加入论文、表格、文稿或引用文件。")
+
+    history: List[Dict[str, str]] = st.session_state.setdefault("research_chat_messages", [])
+    control_left, control_right = st.columns([4, 1])
+    with control_left:
+        chat_attachments = st.file_uploader(
+            "本轮附件（可选）",
+            type=SUPPORTED_ATTACHMENT_TYPES,
+            accept_multiple_files=True,
+            key="research_chat_attachments",
+            help="附件只用于当前会话，不写入服务器数据库。扫描版 PDF 请先 OCR。",
+        )
+    with control_right:
+        st.write("")
+        st.write("")
+        if st.button("清空对话", use_container_width=True, disabled=not bool(history)):
+            st.session_state["research_chat_messages"] = []
+            st.rerun()
+
+    if not history:
+        st.info("可以询问论文解读、研究设计、统计方案、写作修改或审稿回复。对需要真实文献支撑的问题，建议先在“文献检索”获取记录，再把导出文件作为附件加入对话。")
+
+    for message in history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    user_prompt = st.chat_input("输入问题，按 Enter 发送")
+    if not user_prompt:
+        return
+    if not validate_llm_config(llm_api_key, llm_base_url, llm_model):
+        return
+
+    attachment_context, attachment_warnings = build_attachment_context(chat_attachments, max_chars=16_000)
+    for warning in attachment_warnings:
+        st.warning(warning)
+
+    history.append({"role": "user", "content": user_prompt})
+    recent_history = history[-12:]
+    conversation = "\n\n".join(
+        f"{'用户' if item['role'] == 'user' else '助手'}：{item['content']}" for item in recent_history
+    )
+    prompt = f"""请继续下面的科研对话，并直接回答用户最后一个问题。
+
+对话历史：
+{compact_text(conversation, 14_000)}
+
+本轮附件：
+{attachment_context or '无附件'}
+
+要求：区分附件事实、模型推断和仍需核验的信息；不得编造文献、DOI、数据或实验结果。"""
+    try:
+        with st.chat_message("assistant"):
+            with st.spinner("正在分析..."):
+                reply = call_llm(
+                    llm_api_key=llm_api_key.strip(),
+                    llm_provider=llm_provider,
+                    llm_base_url=llm_base_url.strip(),
+                    llm_model=llm_model.strip(),
+                    system_prompt="你是严谨、清晰、可连续追问的生物医学科研助手。",
+                    user_prompt=prompt,
+                    timeout=180,
+                )
+            st.markdown(reply)
+    except Exception as exc:
+        history.pop()
+        st.error(f"对话失败：{exc}")
+        return
+    history.append({"role": "assistant", "content": reply})
+
+
 def render_app() -> None:
-    st.set_page_config(page_title="生物医学文献分析工作台", layout="wide")
+    st.set_page_config(
+        page_title="生物医学科研工作台",
+        page_icon="🧬",
+        layout="wide",
+        initial_sidebar_state="auto",
+    )
     apply_page_style()
-    st.title("生物医学文献分析工作台")
-    st.caption("PDF精读 · 文献检索 · 引用追踪 · 科研写作 · 科研绘图 · PPT汇报")
-    render_quick_start_guide()
+    st.markdown(
+        """
+        <div class="app-hero">
+            <div class="app-kicker">Biomedical Research Workspace</div>
+            <h1>生物医学科研工作台</h1>
+            <p>检索、阅读、分析、写作与汇报集中在一个清晰工作区，并支持附件和连续对话。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
-        st.header("配置")
+        st.header("工作区")
+        workspace = st.radio(
+            "选择功能",
+            ["PDF精读", "文献检索", "引用追踪", "科研任务", "科研绘图", "PPT汇报", "科研对话"],
+            label_visibility="collapsed",
+        )
+        st.divider()
+        st.subheader("模型配置")
         llm_provider = st.selectbox("LLM 服务商", ["OpenAI 兼容", "Google Gemini"])
         defaults = load_config_defaults(llm_provider)
         llm_api_key = st.text_input("LLM API Key", type="password")
@@ -2982,10 +3206,7 @@ def render_app() -> None:
             email = st.text_input("OpenAlex Email", value=defaults["openalex_email"])
             max_papers = st.number_input("最多文献数", min_value=1, max_value=1000, value=20, step=1)
 
-        if llm_provider == "Google Gemini":
-            st.caption("Gemini 使用 Google 原生接口。")
-        else:
-            st.caption("兼容 /chat/completions 的平台均可使用。")
+        st.caption("Key 仅用于当前会话；公开部署建议使用平台 Secrets。")
 
         if st.button("测试连接", use_container_width=True):
             if validate_llm_config(llm_api_key, llm_base_url, llm_model):
@@ -3004,12 +3225,9 @@ def render_app() -> None:
                 except Exception as exc:
                     st.error(f"连接失败：{exc}")
 
-    pdf_tab, literature_tab, citation_tab, nature_tab, ppt_tab = st.tabs(
-        ["PDF精读", "文献检索", "引用追踪", "科研写作", "PPT汇报"]
-    )
-    with pdf_tab:
+    if workspace == "PDF精读":
         render_pdf_deep_reading_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
-    with literature_tab:
+    elif workspace == "文献检索":
         render_literature_search_tab(
             llm_api_key,
             llm_provider,
@@ -3018,12 +3236,16 @@ def render_app() -> None:
             openalex_api_key,
             email,
         )
-    with citation_tab:
+    elif workspace == "引用追踪":
         render_citation_tracking_tab(openalex_api_key, email, int(max_papers))
-    with nature_tab:
+    elif workspace in {"科研任务", "科研绘图"}:
+        if workspace == "科研绘图":
+            st.session_state["nature_category"] = "科研绘图"
         render_nature_toolbox_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
-    with ppt_tab:
+    elif workspace == "PPT汇报":
         render_ppt_report_tab(llm_api_key, llm_provider, llm_base_url, llm_model)
+    else:
+        render_research_chat(llm_api_key, llm_provider, llm_base_url, llm_model)
 
 
 if __name__ == "__main__":
